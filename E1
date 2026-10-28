@@ -1,0 +1,3631 @@
+local UI = (function()
+--[[
+	DERBYBLOOM UI - UI standalone para Roblox (Luau). Sem loadstring, sem libs, tudo por Instance.new.
+	Estrutura: UI.new() -> :CreateWindow() -> :CreateTab() -> :CreateSection() -> controles.
+	Controles retornam a Section (encadeável). O último controle criado fica em section.Last.
+	Acesso global por flag: ui:Get("Flag"), ui:Set("Flag", valor), ui.Controls["Flag"].
+
+	USO (em qualquer script/jogo):
+		local UI = loadstring(readfile("derbybloom_ui.lua"))()          -- ou loadstring(game:HttpGet(url))()
+		local ui = UI.new({ Icon = "rbxassetid://..." })           -- Icon opcional (botão de abrir + header)
+		local win = ui:CreateWindow({ Title = "Meu Hub", Author = "by eu",
+			Icon = "rbxassetid://...", Background = "rbxassetid://...", BackgroundImageTransparency = 0.7 })
+		local tab = win:CreateTab("Main", 1)
+		tab:CreateSection("Geral"):Toggle({ Name = "X", Callback = function(v) end })
+		-- controles: Toggle, Slider, Dropdown, MultiDropdown, Keybind, Button, TextBox, ColorPicker, Label, Divider
+	Tema: rosa e branco (CONFIG.Colors). Padrões de Icon/Background em CONFIG; tudo sobrescrevível por opts.
+]]
+
+local Players = game:GetService("Players")
+local UIS = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local HttpService = game:GetService("HttpService")
+local GuiService = game:GetService("GuiService")
+local CoreGui = game:GetService("CoreGui")
+local CONFIG = {
+	Name = "DerbyBloomUI",                   -- nome do ScreenGui (re-executar remove o antigo)
+	Author = "DerbyBloom",                   -- autor exibido no header da janela (conserta D-01)
+	Title = "DERBYBLOOM",                    -- título padrão da janela
+	ConfigFile = "DerbyBloom_config.json",   -- arquivo do SaveConfig/LoadConfig
+	ToggleKey = Enum.KeyCode.Insert,         -- abre/fecha o menu no PC
+	Icon = "rbxassetid://0",                 -- icone do header e do botao de abrir (placeholder, sem asset obrigatorio)
+	Background = "rbxassetid://0",           -- imagem de fundo da janela (placeholder, sem asset obrigatorio)
+	BackgroundTransparency = 0.7,                     -- 1 = invisivel
+
+	Colors = {
+		Background = Color3.fromRGB(255, 240, 246),   -- #FFF0F6 rosa quase branco
+		Surface = Color3.fromRGB(255, 255, 255),      -- #FFFFFF branco
+		Header = Color3.fromRGB(255, 218, 234),       -- #FFDAEA rosa claro
+		Stroke = Color3.fromRGB(246, 184, 211),       -- #F6B8D3 rosa bebe
+		Accent = Color3.fromRGB(233, 64, 140),        -- #E9408C rosa vivo (ui:SetAccent troca em runtime)
+		Text = Color3.fromRGB(92, 24, 64),            -- #5C1840 ameixa escuro (texto sobre rosa/branco)
+		SubText = Color3.fromRGB(176, 104, 142),      -- #B0688E rosa envelhecido
+		Success = Color3.fromRGB(190, 24, 93),        -- #BE185D
+		Error = Color3.fromRGB(159, 18, 57),          -- #9F1239
+		Scroll = Color3.fromRGB(240, 150, 188),       -- #F096BC barra de rolagem
+		Shadow = Color3.new(0, 0, 0),                 -- sombra falsa da janela
+		Knob = Color3.new(1, 1, 1),                   -- knobs de toggle/slider
+		White = Color3.new(1, 1, 1),                  -- branco puro (gradiente do picker)
+		Black = Color3.new(0, 0, 0),                  -- preto puro (gradiente do picker)
+	},
+
+	Fonts = {
+		Regular = Enum.Font.Gotham,
+		Medium = Enum.Font.GothamMedium,
+		Bold = Enum.Font.GothamBold,
+	},
+
+	Text = {
+		Search = "Buscar em todas as abas...",
+		NoResults = "Nenhum resultado",
+		None = "Nenhum",
+		Press = "Pressione...",
+	},
+
+	Layout = {
+		Desktop = Vector2.new(620, 460),    -- janela em telas grandes
+		SmallBreakpoint = 700,              -- largura (px) abaixo da qual vira layout mobile
+		SmallWidth = 0.92,                  -- % da largura da tela no layout mobile
+		SmallHeight = 0.88,                 -- % da altura da tela no layout mobile
+		RefSize = Vector2.new(1366, 768),   -- resolução de referência do fator de escala
+		ScaleMin = 0.75,
+		ScaleMax = 1.25,
+		Header = 48,
+		Sidebar = 150,
+		Row = 44,                           -- altura padrão de controle
+		Hit = 40,                           -- hitbox mínima para dedo
+		Pad = 8,
+		Corner = 10,
+		CornerWindow = 12,
+		ScrollBar = 8,                      -- espessura da barra (>= 6)
+		TextSize = 14,
+		TitleSize = 16,
+		SmallSize = 12,
+		FloatBtn = 44,                      -- botão flutuante (mobile)
+		ToastWidth = 260,
+		MaxToasts = 4,
+		ToastTime = 3,
+		PopupMax = 200,                     -- altura máxima do popup de dropdown
+	},
+
+	Anim = { Fast = 0.12, Normal = 0.15, Slow = 0.18 },
+	Tooltip = { Hold = 0.6, Show = 2.5 },   -- segurar p/ mostrar; tempo na tela
+	ClearHold = 2,                          -- segundos segurando o keybind p/ limpar
+}
+
+local C, F, T, L, A = CONFIG.Colors, CONFIG.Fonts, CONFIG.Text, CONFIG.Layout, CONFIG.Anim
+local U = { factor = 1, releaseTick = 0 }
+
+local function merge(base, extra)
+	for k, v in pairs(extra) do base[k] = v end
+	return base
+end
+
+local function create(class, props)
+	local inst = Instance.new(class)
+	local parent = props.Parent
+	props.Parent = nil
+	for k, v in pairs(props) do inst[k] = v end
+	inst.Parent = parent -- parent por último (menos recálculo)
+	return inst
+end
+
+function U.isPress(input)
+	local t = input.UserInputType
+	return t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch
+end
+
+-- ÚNICO ponto de conversão: px base -> px reais
+function U.scale(n) return n * U.factor end
+
+function U.viewport()
+	local cam = workspace.CurrentCamera
+	return cam and cam.ViewportSize or L.RefSize
+end
+
+function U.computeFactor()
+	local vp = U.viewport()
+	U.factor = math.clamp(math.min(vp.X / L.RefSize.X, vp.Y / L.RefSize.Y), L.ScaleMin, L.ScaleMax)
+	return U.factor
+end
+
+-- posição do input no mesmo espaço do AbsolutePosition (ScreenGui com IgnoreGuiInset)
+function U.pointer(input)
+	return Vector2.new(input.Position.X, input.Position.Y) + GuiService:GetGuiInset()
+end
+
+function U.tween(inst, time, props)
+	local tw = TweenService:Create(inst, TweenInfo.new(time, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props)
+	tw:Play()
+	return tw
+end
+
+-- igualdade profunda: duas tabelas com o mesmo conteudo sao iguais (evita callback espurio em MultiDropdown/Reset/LoadConfig)
+function U.iguais(a, b)
+	if a == b then return true end
+	if typeof(a) ~= typeof(b) then return false end
+	if typeof(a) ~= "table" then return a == b end
+	local ca, cb = 0, 0
+	for k, v in pairs(a) do
+		cb += 1
+		if not U.iguais(v, b[k]) then return false end
+		ca += 1
+	end
+	for _ in pairs(b) do cb -= 1 end
+	return cb == 0
+end
+
+function U.frame(props)
+	return create("Frame", merge({ BackgroundColor3 = C.Surface, BorderSizePixel = 0 }, props))
+end
+
+function U.label(props)
+	return create("TextLabel", merge({
+		BackgroundTransparency = 1, BorderSizePixel = 0, Font = F.Regular, TextSize = L.TextSize,
+		TextColor3 = C.Text, TextXAlignment = Enum.TextXAlignment.Left,
+	}, props))
+end
+
+function U.button(props)
+	return create("TextButton", merge({
+		BackgroundColor3 = C.Surface, BorderSizePixel = 0, AutoButtonColor = false, Text = "",
+		Font = F.Medium, TextSize = L.TextSize, TextColor3 = C.Text,
+	}, props))
+end
+
+function U.box(props)
+	return create("TextBox", merge({
+		BackgroundTransparency = 1, BorderSizePixel = 0, Font = F.Regular, TextSize = L.TextSize,
+		TextColor3 = C.Text, PlaceholderColor3 = C.SubText, ClearTextOnFocus = false,
+		TextXAlignment = Enum.TextXAlignment.Left, Text = "",
+	}, props))
+end
+
+function U.scroller(props)
+	return create("ScrollingFrame", merge({
+		BackgroundTransparency = 1, BorderSizePixel = 0, Size = UDim2.fromScale(1, 1),
+		CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		ScrollingDirection = Enum.ScrollingDirection.Y, ScrollBarThickness = L.ScrollBar,
+		ScrollBarImageColor3 = C.Scroll, ElasticBehavior = Enum.ElasticBehavior.Always,
+	}, props))
+end
+
+function U.corner(inst, r)
+	return create("UICorner", { CornerRadius = UDim.new(0, r), Parent = inst })
+end
+
+function U.stroke(inst, color, thickness)
+	return create("UIStroke", {
+		Color = color or C.Stroke, Thickness = thickness or 1,
+		ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = inst,
+	})
+end
+
+function U.pad(inst, l, t, r, b)
+	return create("UIPadding", {
+		PaddingLeft = UDim.new(0, l), PaddingTop = UDim.new(0, t),
+		PaddingRight = UDim.new(0, r), PaddingBottom = UDim.new(0, b), Parent = inst,
+	})
+end
+
+function U.list(inst, gap, dir)
+	return create("UIListLayout", {
+		Padding = UDim.new(0, gap or 0), SortOrder = Enum.SortOrder.LayoutOrder,
+		FillDirection = dir or Enum.FillDirection.Vertical, Parent = inst,
+	})
+end
+
+-- seta com dois traços rotacionados (sem assets)
+function U.chevron(parent, up, color, pos)
+	local holder = create("Frame", {
+		BackgroundTransparency = 1, AnchorPoint = Vector2.new(.5, .5),
+		Position = pos or UDim2.fromScale(.5, .5), Size = UDim2.fromOffset(14, 14), Parent = parent,
+	})
+	local y = up and 8 or 6
+	local specs = up and { { 4.5, -45 }, { 9.5, 45 } } or { { 4.5, 45 }, { 9.5, -45 } }
+	for _, s in ipairs(specs) do
+		create("Frame", {
+			BackgroundColor3 = color or C.SubText, BorderSizePixel = 0, AnchorPoint = Vector2.new(.5, .5),
+			Position = UDim2.fromOffset(s[1], y), Size = UDim2.fromOffset(9, 2), Rotation = s[2], Parent = holder,
+		})
+	end
+	return holder
+end
+
+function U.toHex(c)
+	return string.format("#%02X%02X%02X", math.floor(c.R * 255 + .5), math.floor(c.G * 255 + .5), math.floor(c.B * 255 + .5))
+end
+
+function U.fromHex(s)
+	local h = tostring(s):gsub("#", "")
+	if #h ~= 6 or not h:match("^%x+$") then return nil end
+	return Color3.fromRGB(tonumber(h:sub(1, 2), 16), tonumber(h:sub(3, 4), 16), tonumber(h:sub(5, 6), 16))
+end
+
+-- arrasto por mouse E toque; conexões globais só existem durante o arrasto
+function U.drag(handle, h)
+	handle.InputBegan:Connect(function(input)
+		if not U.isPress(input) then return end
+		local moveConn, endConn
+		if h.start then h.start(input) end
+		moveConn = UIS.InputChanged:Connect(function(i)
+			local same = i == input
+				or (input.UserInputType == Enum.UserInputType.MouseButton1 and i.UserInputType == Enum.UserInputType.MouseMovement)
+				or (input.UserInputType == Enum.UserInputType.Touch and i.UserInputType == Enum.UserInputType.Touch)
+			if same and h.move then h.move(i) end
+		end)
+		endConn = UIS.InputEnded:Connect(function(i)
+			if i == input or i.UserInputType == input.UserInputType then
+				moveConn:Disconnect()
+				endConn:Disconnect()
+				if h.stop then h.stop(i) end
+			end
+		end)
+	end)
+end
+
+-- segurar `hold` segundos sem mover (>8px cancela) dispara fn
+function U.longPress(obj, hold, fn)
+	obj.InputBegan:Connect(function(input)
+		if not U.isPress(input) then return end
+		local tick, start = U.releaseTick, input.Position
+		task.delay(hold, function()
+			if U.releaseTick == tick and (input.Position - start).Magnitude < 8 then fn(input) end
+		end)
+	end)
+end
+
+function U.pressFx(btn, normal)
+	btn.InputBegan:Connect(function(input)
+		if U.isPress(input) then U.tween(btn, A.Fast, { BackgroundColor3 = normal:Lerp(C.Accent, .35) }) end
+	end)
+	btn.InputEnded:Connect(function(input)
+		if U.isPress(input) then U.tween(btn, A.Fast, { BackgroundColor3 = normal }) end
+	end)
+end
+
+-- hover é só enfeite; nada depende dele
+function U.hover(btn, normal, over)
+	btn.MouseEnter:Connect(function() U.tween(btn, A.Fast, { BackgroundColor3 = over }) end)
+	btn.MouseLeave:Connect(function() U.tween(btn, A.Fast, { BackgroundColor3 = normal }) end)
+end
+
+local function decimals(n)
+	local d = tostring(n):match("%.(%d+)")
+	return d and #d or 0
+end
+
+local function validBind(v)
+	if v == "None" or v == "MouseButton2" or v == "MouseButton3" then return true end
+	local ok, kc = pcall(function() return Enum.KeyCode[v] end)
+	return ok and kc ~= nil
+end
+
+local function removeOld()
+	local lp = Players.LocalPlayer
+	local roots = { CoreGui, lp and lp:FindFirstChildOfClass("PlayerGui") }
+	local okH, hui = pcall(function() return gethui and gethui() end)
+	if okH and typeof(hui) == "Instance" then table.insert(roots, hui) end
+	for _, p in pairs(roots) do
+		pcall(function()
+			local old = p:FindFirstChild(CONFIG.Name)
+			if old then old:Destroy() end
+		end)
+	end
+end
+
+local function mount(gui)
+	local okH, hui = pcall(function() return gethui and gethui() end)
+	if okH and typeof(hui) == "Instance" then
+		pcall(function() gui.Parent = hui end)
+		if gui.Parent == hui then return end
+	end
+	pcall(function() gui.Parent = CoreGui end)
+	if gui.Parent ~= CoreGui then
+		gui.Parent = Players.LocalPlayer:WaitForChild("PlayerGui")
+	end
+end
+
+-- ============================================================
+-- CLASSES
+-- ============================================================
+local UI = {}
+UI.__index = UI
+UI.HubModules = {} -- registra modulos do hub DerbyBloom (Fase 4): ui.HubModules.Aimbot(ui, win), etc.
+local Window = {}
+Window.__index = Window
+local Tab = {}
+Tab.__index = Tab
+local Section = {}
+Section.__index = Section
+
+-- ---------- UI (raiz) ----------
+function UI.new(opts)
+	removeOld()
+	local self = setmetatable({}, UI)
+	self.Flags, self.Controls, self.Registry, self.AccentFns, self.Conns = {}, {}, {}, {}, {}
+	self.IsMobile = UIS.TouchEnabled and not UIS.MouseEnabled
+	self.ToggleKey = CONFIG.ToggleKey
+	self.Icon = (opts and opts.Icon) or CONFIG.Icon
+	self.Visible = true
+	self.ToastQueue, self.ToastActive, self.ToastSeq, self.TipToken = {}, 0, 0, 0
+
+	self.Gui = create("ScreenGui", {
+		Name = CONFIG.Name, ResetOnSpawn = false, IgnoreGuiInset = true,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 10000,
+	})
+	-- Canvas + UIScale: um único ponto de escala; filhos usam px base
+	self.Canvas = create("Frame", { Name = "Canvas", BackgroundTransparency = 1, BorderSizePixel = 0, Parent = self.Gui })
+	self.UIScale = create("UIScale", { Parent = self.Canvas })
+
+	self.Popups = create("Frame", {
+		Name = "Popups", BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1),
+		ZIndex = 100, Visible = false, Parent = self.Canvas,
+	})
+	self.Toasts = create("Frame", {
+		Name = "Toasts", BackgroundTransparency = 1, AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -12, 0, 12), Size = UDim2.new(0, L.ToastWidth, 1, -24), ZIndex = 150, Parent = self.Canvas,
+	})
+	create("UIListLayout", {
+		Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder,
+		HorizontalAlignment = Enum.HorizontalAlignment.Right, VerticalAlignment = Enum.VerticalAlignment.Top, Parent = self.Toasts,
+	})
+	self.Tip = U.frame({
+		Name = "Tooltip", BackgroundColor3 = C.Header, AnchorPoint = Vector2.new(.5, 1),
+		AutomaticSize = Enum.AutomaticSize.XY, Size = UDim2.new(), ZIndex = 300, Visible = false, Parent = self.Canvas,
+	})
+	U.corner(self.Tip, 8)
+	U.stroke(self.Tip, C.Stroke)
+	U.pad(self.Tip, 10, 6, 10, 6)
+	self.TipLabel = U.label({
+		Size = UDim2.new(), AutomaticSize = Enum.AutomaticSize.XY, TextWrapped = true,
+		TextSize = L.SmallSize + 1, Parent = self.Tip,
+	})
+	create("UISizeConstraint", { MaxSize = Vector2.new(220, math.huge), Parent = self.TipLabel })
+
+	self:_conn(UIS.InputBegan, function(input, gp) self:_input(input, gp) end)
+	self:_conn(UIS.InputEnded, function(input)
+		if U.isPress(input) then U.releaseTick += 1 end
+	end)
+	self:_conn(workspace:GetPropertyChangedSignal("CurrentCamera"), function()
+		self:_hookCamera()
+		self:_refresh()
+	end)
+	self:_hookCamera()
+	self:_refresh()
+	self:_makeFloat()
+	mount(self.Gui)
+	return self
+end
+
+function UI:_conn(signal, fn)
+	table.insert(self.Conns, signal:Connect(fn))
+end
+
+function UI:_hookCamera()
+	if self.CamConn then self.CamConn:Disconnect() end
+	local cam = workspace.CurrentCamera
+	if cam then
+		self.CamConn = cam:GetPropertyChangedSignal("ViewportSize"):Connect(function() self:_refresh() end)
+	end
+end
+
+function UI:_refresh()
+	local vp = U.viewport()
+	local f = U.computeFactor()
+	self.UIScale.Scale = f
+	self.Canvas.Size = UDim2.fromOffset(vp.X / f, vp.Y / f)
+	self:ClosePopup()
+	if self.Window then self.Window:_layout() end
+	if self.Float then self:_placeFloat(self.FloatPos) end
+end
+
+function UI:_bindAccent(fn)
+	table.insert(self.AccentFns, fn)
+	fn()
+end
+
+function UI:SetAccent(color)
+	C.Accent = color
+	for _, fn in ipairs(self.AccentFns) do fn() end
+end
+
+function UI:_uniqueFlag(name)
+	name = tostring(name or "Flag")
+	local flag, i = name, 1
+	while self.Controls[flag] do
+		i += 1
+		flag = name .. "_" .. i
+	end
+	return flag
+end
+
+function UI:Get(flag)
+	return self.Flags[flag]
+end
+
+function UI:Set(flag, value, silent)
+	local ctl = self.Controls[flag]
+	if ctl then ctl:Set(value, silent) end
+end
+
+function UI:ResetAll()
+	for _, ctl in pairs(self.Controls) do ctl:Reset() end
+end
+
+function UI:SetVisible(v)
+	self.Visible = v
+	if self.Window then self.Window.Root.Visible = v end
+	if not v then
+		self:ClosePopup()
+		self:HideTooltip()
+	end
+end
+
+function UI:Toggle()
+	self:SetVisible(not self.Visible)
+end
+
+function UI:Destroy()
+	self.Destroyed = true
+	for _, c in ipairs(self.Conns) do c:Disconnect() end
+	if self.CamConn then self.CamConn:Disconnect() end
+	if self.Window then self.Window:Destroy() end
+	self.Gui:Destroy()
+end
+
+function UI:_input(input, processed)
+	if self.Tip.Visible and U.isPress(input) then self:HideTooltip() end
+	if self.Capture then
+		local cap = self.Capture
+		if input.UserInputType == Enum.UserInputType.Keyboard then
+			if input.KeyCode == Enum.KeyCode.Escape then
+				cap(nil)
+			elseif input.KeyCode == Enum.KeyCode.Backspace or input.KeyCode == Enum.KeyCode.Delete then
+				cap("None")
+			else
+				cap(input.KeyCode.Name)
+			end
+		elseif input.UserInputType == Enum.UserInputType.MouseButton2 or input.UserInputType == Enum.UserInputType.MouseButton3 then
+			cap(input.UserInputType.Name)
+		elseif U.isPress(input) then
+			cap(nil)
+		end
+		return
+	end
+	if processed then return end
+	if input.KeyCode == self.ToggleKey then
+		self:Toggle()
+		return
+	end
+	-- nao dispara keybinds enquanto o jogador digita em um TextBox ou na busca global
+	local focused = UIS:GetFocusedTextBox()
+	if focused and focused:IsA("TextBox") then return end
+	for _, ctl in pairs(self.Controls) do
+		if ctl.Kind == "Keybind" and ctl.Value ~= "None"
+			and (input.KeyCode.Name == ctl.Value or input.UserInputType.Name == ctl.Value) then
+			ctl.Fire()
+		end
+	end
+end
+
+-- botao de abrir/fechar: quadrado arredondado com icone e contorno rosa, arrastavel em X/Y
+function UI:_makeFloat()
+	local s = L.FloatBtn
+	local btn = U.button({
+		Name = "Float", BackgroundColor3 = C.Header, Size = UDim2.fromOffset(s, s), ZIndex = 50, Parent = self.Canvas,
+	})
+	U.corner(btn, 12)
+	local stroke = U.stroke(btn, C.Accent, 2)
+	self:_bindAccent(function() stroke.Color = C.Accent end)
+	if self.Icon and self.Icon ~= "" then
+		local ic = create("ImageLabel", {
+			BackgroundTransparency = 1, Image = self.Icon, ScaleType = Enum.ScaleType.Fit,
+			AnchorPoint = Vector2.new(.5, .5), Position = UDim2.fromScale(.5, .5),
+			Size = UDim2.new(1, -10, 1, -10), ZIndex = 51, Parent = btn,
+		})
+		U.corner(ic, 8)
+		self.FloatIcon = ic
+	end
+	self.Float = btn
+	local vp = U.viewport()
+	self.FloatPos = Vector2.new(vp.X / U.factor - s - 12, vp.Y / U.factor * .4)
+	local startIn, startPos, moved = Vector2.zero, Vector2.zero, false
+	U.drag(btn, {
+		start = function(input)
+			startIn = Vector2.new(input.Position.X, input.Position.Y)
+			startPos, moved = self.FloatPos, false
+		end,
+		move = function(input)
+			local d = Vector2.new(input.Position.X, input.Position.Y) - startIn
+			if d.Magnitude > 6 then moved = true end
+			if moved then self:_placeFloat(startPos + d / U.factor) end
+		end,
+		stop = function()
+			if not moved then self:Toggle() end
+		end,
+	})
+	self:_placeFloat(self.FloatPos)
+end
+
+function UI:OpenPopup(anchor, w, h, build)
+	self:ClosePopup()
+	local f, vp = U.factor, U.viewport()
+	self.Popups.Visible = true
+	local blocker = U.button({ Name = "Blocker", BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1), ZIndex = 1, Parent = self.Popups })
+	blocker.Activated:Connect(function() self:ClosePopup() end)
+	local ap, as = anchor.AbsolutePosition, anchor.AbsoluteSize
+	local pw, ph = w * f, h * f
+	local x = math.clamp(ap.X + as.X - pw, 6, math.max(6, vp.X - pw - 6))
+	local below = ap.Y + as.Y + 4
+	local y = (below + ph <= vp.Y - 6) and below or math.max(6, ap.Y - ph - 4)
+	local frame = U.frame({
+		Name = "Popup", BackgroundColor3 = C.Surface, Position = UDim2.fromOffset(x / f, y / f),
+		Size = UDim2.fromOffset(w, 0), ClipsDescendants = true, ZIndex = 2, Parent = self.Popups,
+	})
+	U.corner(frame, L.Corner)
+	U.stroke(frame, C.Stroke)
+	build(frame)
+	U.tween(frame, A.Normal, { Size = UDim2.fromOffset(w, h) })
+	self.Popup = frame
+	return frame
+end
+
+function UI:ClosePopup()
+	for _, c in ipairs(self.Popups:GetChildren()) do c:Destroy() end
+	self.Popups.Visible = false
+	self.Popup = nil
+end
+
+function UI:ShowTooltip(text, px)
+	local f, vp = U.factor, U.viewport()
+	self.TipLabel.Text = text
+	local x = math.clamp(px.X, U.scale(120), vp.X - U.scale(120))
+	local y = math.max(px.Y - U.scale(18), U.scale(60))
+	self.Tip.Position = UDim2.fromOffset(x / f, y / f)
+	self.Tip.Visible = true
+	self.TipToken += 1
+	local my = self.TipToken
+	task.delay(CONFIG.Tooltip.Show, function()
+		if self.TipToken == my and not self.Destroyed then self.Tip.Visible = false end
+	end)
+end
+
+function UI:Notify(title, text, kind, duration)
+	table.insert(self.ToastQueue, { title = title or "", text = text or "", kind = kind or "info", duration = duration or L.ToastTime })
+	self:_pump()
+end
+
+function UI:_pump()
+	if self.Destroyed then return end
+	while self.ToastActive < L.MaxToasts and #self.ToastQueue > 0 do
+		self:_showToast(table.remove(self.ToastQueue, 1))
+	end
+end
+
+function UI:_showToast(t)
+	self.ToastActive += 1
+	self.ToastSeq += 1
+	local color = t.kind == "success" and C.Success or t.kind == "error" and C.Error or C.Accent
+	local off = L.ToastWidth + 40
+	local wrap = create("Frame", {
+		BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+		LayoutOrder = self.ToastSeq, Parent = self.Toasts,
+	})
+	local card = U.button({
+		BackgroundColor3 = C.Header, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+		Position = UDim2.fromOffset(off, 0), Parent = wrap,
+	})
+	U.corner(card, L.Corner)
+	U.stroke(card, color, 1.5)
+	U.pad(card, 12, 8, 12, 8)
+	U.list(card, 2)
+	U.label({
+		Text = t.title, Font = F.Bold, TextColor3 = color, TextWrapped = true, LayoutOrder = 1,
+		Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, Parent = card,
+	})
+	if t.text ~= "" then
+		U.label({
+			Text = t.text, TextColor3 = C.SubText, TextSize = L.SmallSize + 1, TextWrapped = true, LayoutOrder = 2,
+			Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, Parent = card,
+		})
+	end
+	U.tween(card, A.Normal, { Position = UDim2.fromOffset(0, 0) })
+	local closed = false
+	local function close()
+		if closed then return end
+		closed = true
+		U.tween(card, A.Normal, { Position = UDim2.fromOffset(off, 0) }).Completed:Connect(function()
+			wrap:Destroy()
+			self.ToastActive -= 1
+			self:_pump()
+		end)
+	end
+	card.Activated:Connect(close)
+	task.delay(t.duration, close)
+end
+
+function UI:SaveConfig(file)
+	file = file or CONFIG.ConfigFile
+	local data = { _v = 2, _flags = {} }
+	for flag, ctl in pairs(self.Controls) do
+		local v = ctl.Value
+		if typeof(v) == "Color3" then v = { __color = U.toHex(v) } end
+		data[flag] = v
+	end
+	local json = HttpService:JSONEncode(data)
+	local ok = typeof(writefile) == "function" and pcall(writefile, file, json)
+	if not ok then
+		self.Memory = self.Memory or {}
+		self.Memory[file] = json -- fallback silencioso: memória
+	end
+	return ok and true or false
+end
+
+-- aplica alias de flags antigas (ex.: CrezUI.* -> DerbyBloom.*) lido do _flags do arquivo
+local function aplicarAlias(data, aliases)
+	if typeof(aliases) ~= "table" then return end
+	for antiga, nova in pairs(aliases) do
+		if data[antiga] ~= nil and data[nova] == nil then
+			data[nova] = data[antiga]
+		end
+	end
+end
+
+function UI:LoadConfig(file)
+	file = file or CONFIG.ConfigFile
+	local json
+	local function ler(arq)
+		if typeof(isfile) == "function" and typeof(readfile) == "function" then
+			local ok, res = pcall(function()
+				if isfile(arq) then return readfile(arq) end
+			end)
+			if ok then return res end
+		end
+		return nil
+	end
+	json = ler(file)
+	-- fallback para o nome antigo de config (migracao de arquivo CrezUI_config.json)
+	if not json then json = ler("CrezUI_config.json") end
+	json = json or (self.Memory and self.Memory[file])
+	if not json then return false end
+	local ok, data = pcall(HttpService.JSONDecode, HttpService, json)
+	if not ok or typeof(data) ~= "table" then return false end
+	aplicarAlias(data, data._flags)
+	for flag, v in pairs(data) do
+		if flag == "_v" or flag == "_flags" then continue end
+		local ctl = self.Controls[flag]
+		if ctl then
+			if typeof(v) == "table" and v.__color then v = U.fromHex(v.__color) end
+			if v ~= nil then ctl:Set(v) end
+		end
+	end
+	return true
+end
+
+function UI:CreateWindow(opts)
+	opts = opts or {}
+	if self.Window then return self.Window end
+	local ui = self
+	if opts.ToggleKey then ui.ToggleKey = opts.ToggleKey end
+	if opts.Icon and ui.FloatIcon then ui.FloatIcon.Image = opts.Icon end
+	local win = setmetatable({
+		UI = ui, Tabs = {}, Minimized = false, Dragged = false, SearchActive = false,
+		UserPicked = false, Size = L.Desktop,
+	}, Window)
+	ui.Window = win
+
+	local root = create("Frame", {
+		Name = "Window", BackgroundTransparency = 1, Size = UDim2.fromOffset(L.Desktop.X, L.Desktop.Y),
+		ZIndex = 1, Visible = ui.Visible, Parent = ui.Canvas,
+	})
+	win.Root = root
+	-- sombra falsa: Frame escuro deslocado atrás da janela
+	local shadow = U.frame({
+		Name = "Shadow", BackgroundColor3 = C.Shadow, BackgroundTransparency = .65,
+		Position = UDim2.fromOffset(4, 6), Size = UDim2.fromScale(1, 1), ZIndex = 1, Parent = root,
+	})
+	U.corner(shadow, L.CornerWindow)
+	local main = U.frame({
+		Name = "Main", BackgroundColor3 = C.Background, Size = UDim2.fromScale(1, 1),
+		ClipsDescendants = true, ZIndex = 2, Parent = root,
+	})
+	U.corner(main, L.CornerWindow)
+	U.stroke(main, C.Stroke)
+
+	local bgId = opts.Background or CONFIG.Background
+	if bgId and bgId ~= "" then
+		local bg = create("ImageLabel", {
+			Name = "Background", BackgroundTransparency = 1, Image = bgId, ScaleType = Enum.ScaleType.Crop,
+			ImageTransparency = opts.BackgroundImageTransparency or CONFIG.BackgroundTransparency,
+			Size = UDim2.fromScale(1, 1), ZIndex = 1, Parent = main,
+		})
+		U.corner(bg, L.CornerWindow)
+	end
+
+	-- header
+	local header = U.frame({ Name = "Header", BackgroundColor3 = C.Header, Size = UDim2.new(1, 0, 0, L.Header), Parent = main })
+	U.corner(header, L.CornerWindow)
+	win.HeaderFill = U.frame({
+		BackgroundColor3 = C.Header, Position = UDim2.new(0, 0, 1, -L.CornerWindow),
+		Size = UDim2.new(1, 0, 0, L.CornerWindow), Parent = header,
+	})
+	local dragArea = create("Frame", {
+		Name = "DragArea", BackgroundTransparency = 1, Size = UDim2.new(1, -(2 * L.Hit + 12), 1, 0), Parent = header,
+	})
+	local iconId = opts.Icon or ui.Icon
+	local textX = 14
+	if iconId and iconId ~= "" then
+		local ic = create("ImageLabel", {
+			Name = "Icon", BackgroundTransparency = 1, Image = iconId, ScaleType = Enum.ScaleType.Fit,
+			Position = UDim2.fromOffset(12, (L.Header - 28) / 2), Size = UDim2.fromOffset(28, 28), Parent = dragArea,
+		})
+		U.corner(ic, 8)
+		textX = 48
+	end
+	local author = opts.Author or CONFIG.Author
+	U.label({
+		Text = opts.Title or CONFIG.Title, Font = F.Bold, TextSize = L.TitleSize,
+		Position = UDim2.fromOffset(textX, author and 6 or 0), Size = UDim2.new(1, -textX, 0, author and 22 or L.Header),
+		Parent = dragArea,
+	})
+	if author then
+		U.label({
+			Text = author, TextColor3 = C.SubText, TextSize = L.SmallSize - 1,
+			Position = UDim2.fromOffset(textX, 27), Size = UDim2.new(1, -textX, 0, 14), Parent = dragArea,
+		})
+	end
+
+	local function headerBtn(xOff)
+		local b = U.button({
+			BackgroundColor3 = C.Header, AnchorPoint = Vector2.new(1, 0),
+			Position = UDim2.new(1, xOff, 0, (L.Header - L.Hit) / 2), Size = UDim2.fromOffset(L.Hit, L.Hit), Parent = header,
+		})
+		U.corner(b, 8)
+		U.hover(b, C.Header, C.Stroke)
+		return b
+	end
+	local closeBtn = headerBtn(-4)
+	for _, rot in ipairs({ 45, -45 }) do
+		create("Frame", {
+			BackgroundColor3 = C.Text, BorderSizePixel = 0, AnchorPoint = Vector2.new(.5, .5),
+			Position = UDim2.fromScale(.5, .5), Size = UDim2.fromOffset(16, 2), Rotation = rot, Parent = closeBtn,
+		})
+	end
+	local minBtn = headerBtn(-4 - L.Hit)
+	create("Frame", {
+		BackgroundColor3 = C.Text, BorderSizePixel = 0, AnchorPoint = Vector2.new(.5, .5),
+		Position = UDim2.fromScale(.5, .5), Size = UDim2.fromOffset(16, 2), Parent = minBtn,
+	})
+	closeBtn.Activated:Connect(function() ui:SetVisible(false) end)
+	minBtn.Activated:Connect(function() win:SetMinimized(not win.Minimized) end)
+
+	local startMouse, startPos = Vector2.zero, Vector2.zero
+	U.drag(dragArea, {
+		start = function(input)
+			ui:ClosePopup()
+			startMouse = Vector2.new(input.Position.X, input.Position.Y)
+			startPos = Vector2.new(root.Position.X.Offset, root.Position.Y.Offset)
+		end,
+		move = function(input)
+			win.Dragged = true
+			win:_place(startPos + (Vector2.new(input.Position.X, input.Position.Y) - startMouse) / U.factor)
+		end,
+	})
+
+	-- corpo
+	local body = create("Frame", {
+		Name = "Body", BackgroundTransparency = 1, Position = UDim2.fromOffset(0, L.Header),
+		Size = UDim2.new(1, 0, 1, -L.Header), Parent = main,
+	})
+	win.Body = body
+
+	-- busca global
+	local searchHolder = U.frame({
+		Name = "Search", BackgroundTransparency = .25, Position = UDim2.fromOffset(L.Pad, L.Pad), Size = UDim2.new(1, -2 * L.Pad, 0, L.Hit), Parent = body,
+	})
+	U.corner(searchHolder, L.Corner)
+	local searchStroke = U.stroke(searchHolder, C.Stroke)
+	win.SearchBox = U.box({
+		PlaceholderText = T.Search, Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -24, 1, 0), Parent = searchHolder,
+	})
+	win.SearchBox.Focused:Connect(function() U.tween(searchStroke, A.Fast, { Color = C.Accent }) end)
+	win.SearchBox.FocusLost:Connect(function() U.tween(searchStroke, A.Fast, { Color = C.Stroke }) end)
+	win.SearchBox:GetPropertyChangedSignal("Text"):Connect(function()
+		win._searchToken = (win._searchToken or 0) + 1
+		local my = win._searchToken
+		task.delay(0.15, function()
+			if my == win._searchToken then win:_search(win.SearchBox.Text) end
+		end)
+	end)
+
+	-- sidebar (telas grandes) e chips (telas pequenas)
+	win.Sidebar = U.frame({ Name = "Sidebar", BackgroundTransparency = .25, Parent = body })
+	U.corner(win.Sidebar, L.Corner)
+	U.stroke(win.Sidebar, C.Stroke)
+	win.SideList = U.scroller({ Parent = win.Sidebar })
+	U.pad(win.SideList, 6, 6, 6, 6)
+	U.list(win.SideList, 4)
+
+	win.Chips = create("ScrollingFrame", {
+		Name = "Chips", BackgroundTransparency = 1, BorderSizePixel = 0, CanvasSize = UDim2.new(),
+		AutomaticCanvasSize = Enum.AutomaticSize.X, ScrollingDirection = Enum.ScrollingDirection.X,
+		ScrollBarThickness = L.ScrollBar, ScrollBarImageColor3 = C.Scroll,
+		ElasticBehavior = Enum.ElasticBehavior.Always, Visible = false, Parent = body,
+	})
+	U.list(win.Chips, 6, Enum.FillDirection.Horizontal)
+
+	-- host das páginas + resultados de busca + voltar ao topo
+	local host = create("Frame", { Name = "PageHost", BackgroundTransparency = 1, ClipsDescendants = true, Parent = body })
+	win.PageHost = host
+	win.SearchPage = U.scroller({ Name = "SearchPage", Visible = false, Parent = host })
+	U.pad(win.SearchPage, 0, 0, L.ScrollBar + 4, 8)
+	U.list(win.SearchPage, 6)
+	win.TopBtn = U.button({
+		Name = "Top", BackgroundColor3 = C.Header, AnchorPoint = Vector2.new(1, 1),
+		Position = UDim2.new(1, -14, 1, -10), Size = UDim2.fromOffset(L.Hit, L.Hit), ZIndex = 10, Visible = false, Parent = host,
+	})
+	U.corner(win.TopBtn, L.Hit / 2)
+	U.stroke(win.TopBtn, C.Stroke)
+	U.chevron(win.TopBtn, true, C.Accent)
+	win.TopBtn.Activated:Connect(function()
+		if win.Active then U.tween(win.Active.Page, A.Slow, { CanvasPosition = Vector2.new(0, 0) }) end
+	end)
+
+	win:_layout()
+	return win
+end
+
+function Window:_place(pos)
+	local f, vp = U.factor, U.viewport()
+	local rw, rh = self.Root.Size.X.Offset, self.Root.Size.Y.Offset
+	self.Root.Position = UDim2.fromOffset(
+		math.clamp(pos.X, 0, math.max(0, vp.X / f - rw)),
+		math.clamp(pos.Y, 0, math.max(0, vp.Y / f - rh))
+	)
+	self.UI:ClosePopup() -- fecha popup ao arrastar a janela (D-07)
+end
+
+function Window:_layout()
+	local f, vp = U.factor, U.viewport()
+	local small = vp.X < L.SmallBreakpoint
+	self.Small = small
+	local w, h
+	if small then
+		w, h = vp.X * L.SmallWidth / f, vp.Y * L.SmallHeight / f
+	else
+		w, h = L.Desktop.X, L.Desktop.Y
+	end
+	w, h = math.min(w, vp.X * .98 / f), math.min(h, vp.Y * .98 / f)
+	self.Size = Vector2.new(w, h)
+	self.Root.Size = UDim2.fromOffset(w, self.Minimized and L.Header or h)
+
+	local pad = L.Pad
+	local top = 2 * pad + L.Hit
+	self.Sidebar.Visible = not small
+	self.Chips.Visible = small
+	if small then
+		local chipsH = L.Hit + 6
+		self.Chips.Position = UDim2.fromOffset(pad, top)
+		self.Chips.Size = UDim2.new(1, -2 * pad, 0, chipsH)
+		local pt = top + chipsH + 4
+		self.PageHost.Position = UDim2.fromOffset(pad, pt)
+		self.PageHost.Size = UDim2.new(1, -2 * pad, 1, -(pt + pad))
+	else
+		self.Sidebar.Position = UDim2.fromOffset(pad, top)
+		self.Sidebar.Size = UDim2.new(0, L.Sidebar, 1, -(top + pad))
+		local pl = L.Sidebar + 2 * pad
+		self.PageHost.Position = UDim2.fromOffset(pl, top)
+		self.PageHost.Size = UDim2.new(1, -(pl + pad), 1, -(top + pad))
+	end
+
+	if self.Dragged then
+		self:_place(Vector2.new(self.Root.Position.X.Offset, self.Root.Position.Y.Offset))
+	else
+		self:_place(Vector2.new((vp.X / f - w) / 2, (vp.Y / f - h) / 2))
+	end
+end
+
+function Window:SetMinimized(m)
+	self.Minimized = m
+	self.UI:ClosePopup()
+	if m then
+		U.tween(self.Root, A.Normal, { Size = UDim2.fromOffset(self.Size.X, L.Header) })
+		self.HeaderFill.Visible = false
+		task.delay(A.Normal, function()
+			if self.Minimized then self.Body.Visible = false end
+		end)
+	else
+		self.Body.Visible = true
+		self.HeaderFill.Visible = true
+		U.tween(self.Root, A.Normal, { Size = UDim2.fromOffset(self.Size.X, self.Size.Y) })
+	end
+end
+
+function Window:_updateTop()
+	local p = self.Active and self.Active.Page
+	self.TopBtn.Visible = p ~= nil and not self.SearchActive and not self.Minimized
+		and p.CanvasPosition.Y > 120 and p.AbsoluteCanvasSize.Y > p.AbsoluteSize.Y * 1.5
+end
+
+function Window:SelectTab(tab, instant)
+	self.Active = tab
+	for _, t in ipairs(self.Tabs) do
+		local sel = t == tab
+		t.Selected = sel
+		t:_style(sel)
+		t.Page.Visible = sel and not self.SearchActive
+	end
+	if not instant and not self.SearchActive then
+		tab.Page.Position = UDim2.fromOffset(0, 12)
+		U.tween(tab.Page, A.Normal, { Position = UDim2.fromOffset(0, 0) })
+	end
+	self:_updateTop()
+end
+
+function Window:CreateTab(name, order)
+	local ui = self.UI
+	local tab = setmetatable({
+		Window = self, UI = ui, Name = name, Order = order or (#self.Tabs + 1), Sections = {}, Selected = false,
+	}, Tab)
+	tab.Page = U.scroller({ Name = name, Visible = false, Parent = self.PageHost })
+	U.pad(tab.Page, 0, 0, L.ScrollBar + 4, 8)
+	U.list(tab.Page, 8)
+	tab.Page:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
+		if self.Active == tab then self:_updateTop() end
+		self.UI:ClosePopup() -- fecha popup ao rolar a pagina (D-07)
+	end)
+
+	tab.Button = U.button({
+		Name = name, BackgroundColor3 = C.Accent, BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, L.Hit),
+		Text = name, TextColor3 = C.SubText, LayoutOrder = tab.Order, Parent = self.SideList,
+	})
+	U.corner(tab.Button, 8)
+	tab.Chip = U.button({
+		Name = name, BackgroundColor3 = C.Accent, BackgroundTransparency = 1, Size = UDim2.new(0, 0, 0, L.Hit),
+		AutomaticSize = Enum.AutomaticSize.X, Text = name, TextColor3 = C.SubText, LayoutOrder = tab.Order, Parent = self.Chips,
+	})
+	U.corner(tab.Chip, 8)
+	U.pad(tab.Chip, 16, 0, 16, 0)
+	local function pick()
+		self.UserPicked = true
+		self.SearchBox.Text = ""
+		self:SelectTab(tab)
+	end
+	tab.Button.Activated:Connect(pick)
+	tab.Chip.Activated:Connect(pick)
+
+	table.insert(self.Tabs, tab)
+	table.sort(self.Tabs, function(a, b) return a.Order < b.Order end)
+	if not self.UserPicked then self:SelectTab(self.Tabs[1], true) end
+	ui:_bindAccent(function() tab:_style(tab.Selected) end)
+	return tab
+end
+
+function Tab:_style(selected)
+	for _, b in ipairs({ self.Button, self.Chip }) do
+		U.tween(b, A.Normal, {
+			BackgroundColor3 = C.Accent, BackgroundTransparency = selected and .85 or 1,
+			TextColor3 = selected and C.Accent or C.SubText,
+		})
+	end
+end
+
+function Window:_search(raw)
+	local ui = self.UI
+	local q = (raw or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+	for _, c in ipairs(self.SearchPage:GetChildren()) do
+		if c:IsA("GuiObject") then c:Destroy() end
+	end
+	if q == "" then
+		self.SearchActive = false
+		self.SearchPage.Visible = false
+		if self.Active then self:SelectTab(self.Active, true) end
+		return
+	end
+	self.SearchActive = true
+	for _, t in ipairs(self.Tabs) do t.Page.Visible = false end
+	self.SearchPage.Visible = true
+	self.TopBtn.Visible = false
+	local shown = 0
+	for _, entry in ipairs(ui.Registry) do
+		if entry.Name and string.find(entry.Name:lower(), q, 1, true) then
+			shown += 1
+			local b = U.button({
+				BackgroundColor3 = C.Surface, Size = UDim2.new(1, 0, 0, L.Row), LayoutOrder = shown, Parent = self.SearchPage,
+			})
+			U.corner(b, 8)
+			U.stroke(b, C.Stroke)
+			U.label({
+				Text = entry.Name, Position = UDim2.fromOffset(12, 0), Size = UDim2.new(.6, -12, 1, 0),
+				TextTruncate = Enum.TextTruncate.AtEnd, Parent = b,
+			})
+			U.label({
+				Text = entry.Tab.Name, TextColor3 = C.Accent, TextSize = L.SmallSize, TextXAlignment = Enum.TextXAlignment.Right,
+				Position = UDim2.new(.6, 0, 0, 0), Size = UDim2.new(.4, -12, 1, 0), Parent = b,
+			})
+			b.Activated:Connect(function() self:Goto(entry) end)
+		end
+	end
+	if shown == 0 then
+		U.label({
+			Text = T.NoResults, TextColor3 = C.SubText, TextXAlignment = Enum.TextXAlignment.Center,
+			Size = UDim2.new(1, 0, 0, L.Row), Parent = self.SearchPage,
+		})
+	end
+end
+
+-- pula para a aba do controle, rola até ele e dá um flash
+function Window:Goto(entry)
+	self.SearchBox.Text = ""
+	self.UserPicked = true
+	self:SelectTab(entry.Tab)
+	task.spawn(function()
+		task.wait(.05)
+		local row, page = entry.Row, entry.Tab.Page
+		if not row.Parent then return end
+		local y = (row.AbsolutePosition.Y - page.AbsolutePosition.Y) / U.factor + page.CanvasPosition.Y
+		page.CanvasPosition = Vector2.new(0, math.max(0, y - 8))
+		row.BackgroundColor3 = C.Accent
+		row.BackgroundTransparency = .7
+		U.tween(row, .9, { BackgroundTransparency = 1 })
+	end)
+end
+
+function Window:Destroy()
+	for _, t in ipairs(self.Tabs) do t:Destroy() end
+	if self.Root then pcall(function() self.Root:Destroy() end) end
+	self.UI.Window = nil
+end
+function Tab:Destroy()
+	for _, s in ipairs(self.Sections) do s:Destroy() end
+	for _, b in ipairs({ self.Page, self.Button, self.Chip }) do
+		if b then pcall(function() b:Destroy() end) end
+	end
+	self.Sections = {}
+end
+
+-- ---------- Section ----------
+function Tab:CreateSection(title)
+	local sec = setmetatable({ Tab = self, UI = self.UI, Window = self.Window, Name = title, N = 0 }, Section)
+	local card = U.frame({
+		Name = title, BackgroundTransparency = .2, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+		LayoutOrder = #self.Sections + 1, Parent = self.Page,
+	})
+	U.corner(card, L.Corner)
+	U.stroke(card, C.Stroke)
+	U.pad(card, 10, 8, 10, 8)
+	U.list(card, 4)
+	U.label({
+		Text = string.upper(title), Font = F.Bold, TextSize = L.SmallSize, TextColor3 = C.SubText,
+		Size = UDim2.new(1, 0, 0, 22), LayoutOrder = 0, Parent = card,
+	})
+	sec.Card = card
+	table.insert(self.Sections, sec)
+	return sec
+end
+function Section:_row(height, clickable)
+	self.N += 1
+	local props = {
+		BackgroundColor3 = C.Accent, BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, height), LayoutOrder = self.N, Parent = self.Card,
+	}
+	local row = clickable and U.button(props) or U.frame(props)
+	U.corner(row, 8)
+	return row
+end
+
+function Section:_hook(label, desc)
+	if not desc then return end
+	local ui = self.UI
+	U.longPress(label, CONFIG.Tooltip.Hold, function(input)
+		ui:ShowTooltip(desc, U.pointer(input))
+	end)
+end
+
+-- registra controle com flag: setter(v) atualiza o visual e devolve o valor aceito (ou nil)
+function Section:_register(kind, opts, row, default, setter)
+	local ui = self.UI
+	local flag = ui:_uniqueFlag(opts.Flag or opts.Name)
+	local ctl = { Flag = flag, Kind = kind, Row = row, Default = default, Value = default }
+	function ctl:Set(v, silent)
+		local nv = setter(v)
+		if nv == nil then return end
+		local changed = not U.iguais(nv, self.Value)
+		self.Value = nv
+		ui.Flags[flag] = nv
+		if changed and not silent and opts.Callback then
+			task.spawn(function()
+				local ok, err = pcall(opts.Callback, nv)
+				if not ok then
+					warn("[derbybloom] callback '" .. tostring(flag) .. "' falhou: " .. tostring(err))
+				end
+			end)
+		end
+	end
+	function ctl:Get() return self.Value end
+	function ctl:Reset() self:Set(self.Default) end
+	-- rastreamento de conexoes por controle (resolve D-06)
+	ctl.Conns = {}
+	function ctl:_conn(signal, fn)
+		table.insert(self.Conns, signal:Connect(fn))
+	end
+	function ctl:Destroy()
+		for _, c in ipairs(self.Conns) do pcall(function() c:Disconnect() end) end
+		self.Conns = {}
+		local ui = self.UI
+		ui.Controls[self.Flag] = nil
+		ui.Flags[self.Flag] = nil
+		for i, e in ipairs(ui.Registry) do
+			if e.Id == self.Flag then table.remove(ui.Registry, i); break end
+		end
+		if self.Row then pcall(function() self.Row:Destroy() end) end
+	end
+	local first = setter(default)
+	if first ~= nil then ctl.Value, ctl.Default = first, first end
+	ui.Flags[flag] = ctl.Value
+	ui.Controls[flag] = ctl
+	-- dedupe: id unico (o proprio flag, ja unico); nao insere duplicado no Registry
+	local jaExiste = false
+	for _, e in ipairs(ui.Registry) do
+		if e.Id == flag then jaExiste = true; break end
+	end
+	if not jaExiste then
+		table.insert(ui.Registry, { Id = flag, Name = opts.Name, Tab = self.Tab, Row = row })
+	end
+	self.Last = ctl
+	return ctl
+end
+
+function Section:Toggle(opts)
+	local row = self:_row(L.Row, true)
+	local label = U.label({ Text = opts.Name, Position = UDim2.fromOffset(4, 0), Size = UDim2.new(1, -64, 1, 0), Parent = row })
+	self:_hook(label, opts.Description)
+	local track = U.frame({
+		BackgroundColor3 = C.Stroke, AnchorPoint = Vector2.new(1, .5), Position = UDim2.new(1, -4, .5, 0),
+		Size = UDim2.fromOffset(44, 24), Parent = row,
+	})
+	U.corner(track, 12)
+	local knob = U.frame({
+		BackgroundColor3 = C.Knob, AnchorPoint = Vector2.new(0, .5),
+		Position = UDim2.new(0, 3, .5, 0), Size = UDim2.fromOffset(18, 18), Parent = track,
+	})
+	U.corner(knob, 9)
+	local ctl
+	local function setter(v)
+		v = v and true or false
+		U.tween(track, A.Normal, { BackgroundColor3 = v and C.Accent or C.Stroke })
+		U.tween(knob, A.Normal, { Position = v and UDim2.new(0, 23, .5, 0) or UDim2.new(0, 3, .5, 0) })
+		return v
+	end
+	ctl = self:_register("Toggle", opts, row, opts.Default == true, setter)
+	self.UI:_bindAccent(function() track.BackgroundColor3 = ctl.Value and C.Accent or C.Stroke end)
+	ctl:_conn(row.Activated, function() ctl:Set(not ctl.Value) end)
+	return self
+end
+
+function Section:Slider(opts)
+	local min, max, step = opts.Min or 0, opts.Max or 100, opts.Step or 1
+	local suffix = opts.Suffix or ""
+	local dec = math.max(decimals(step), decimals(min))
+	local row = self:_row(L.Hit + 36, false)
+	local label = U.label({ Text = opts.Name, Position = UDim2.fromOffset(4, 0), Size = UDim2.new(1, -92, 0, L.Hit), Parent = row })
+	self:_hook(label, opts.Description)
+	local box = U.box({
+		BackgroundColor3 = C.Background, BackgroundTransparency = 0, Font = F.Medium,
+		TextXAlignment = Enum.TextXAlignment.Center, AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -4, 0, 0), Size = UDim2.fromOffset(84, L.Hit), Parent = row,
+	})
+	U.corner(box, 8)
+	U.stroke(box, C.Stroke)
+	local hit = create("Frame", {
+		BackgroundTransparency = 1, Position = UDim2.fromOffset(4, L.Hit), Size = UDim2.new(1, -8, 0, 36), Parent = row,
+	})
+	local bar = U.frame({
+		BackgroundColor3 = C.Stroke, AnchorPoint = Vector2.new(0, .5), Position = UDim2.fromScale(0, .5),
+		Size = UDim2.new(1, 0, 0, 6), Parent = hit,
+	})
+	U.corner(bar, 3)
+	local fill = U.frame({ BackgroundColor3 = C.Accent, Size = UDim2.fromScale(0, 1), Parent = bar })
+	U.corner(fill, 3)
+	local knob = U.frame({
+		BackgroundColor3 = C.Knob, AnchorPoint = Vector2.new(.5, .5),
+		Position = UDim2.fromScale(0, .5), Size = UDim2.fromOffset(18, 18), Parent = bar,
+	})
+	U.corner(knob, 9)
+	local function snap(v)
+		v = math.clamp(v, min, max)
+		v = min + math.floor((v - min) / step + .5) * step
+		local m = 10 ^ dec
+		return math.clamp(math.floor(v * m + .5) / m, min, max)
+	end
+	local function setter(v)
+		v = tonumber(v)
+		if not v then return nil end
+		v = snap(v)
+		local r = max > min and (v - min) / (max - min) or 0
+		fill.Size = UDim2.fromScale(r, 1)
+		knob.Position = UDim2.fromScale(r, .5)
+		box.Text = tostring(v) .. suffix
+		return v
+	end
+	local ctl = self:_register("Slider", opts, row, snap(opts.Default or min), setter)
+	self.UI:_bindAccent(function() fill.BackgroundColor3 = C.Accent end)
+
+	ctl:_conn(box.Focused, function() box.Text = tostring(ctl.Value) end)
+	ctl:_conn(box.FocusLost, function()
+		ctl:Set(tonumber(box.Text:match("-?%d*%.?%d+")) or ctl.Value)
+	end)
+	local page = self.Tab.Page
+	local function fromInput(input)
+		local r = (U.pointer(input).X - bar.AbsolutePosition.X) / math.max(1, bar.AbsoluteSize.X)
+		ctl:Set(min + (max - min) * math.clamp(r, 0, 1))
+	end
+	U.drag(hit, {
+		start = function(input)
+			page.ScrollingEnabled = false -- evita rolar a página enquanto arrasta
+			fromInput(input)
+		end,
+		move = fromInput,
+		stop = function() page.ScrollingEnabled = true end,
+	})
+	return self
+end
+
+function Section:Dropdown(opts)
+	local ui = self.UI
+	local options = opts.Options or {}
+	local row = self:_row(L.Row, false)
+	local label = U.label({ Text = opts.Name, Position = UDim2.fromOffset(4, 0), Size = UDim2.new(1, -152, 1, 0), Parent = row })
+	self:_hook(label, opts.Description)
+	local btn = U.button({
+		BackgroundColor3 = C.Background, AnchorPoint = Vector2.new(1, .5), Position = UDim2.new(1, -4, .5, 0),
+		Size = UDim2.fromOffset(144, L.Hit), Parent = row,
+	})
+	U.corner(btn, 8)
+	U.stroke(btn, C.Stroke)
+	local valueLabel = U.label({
+		Position = UDim2.fromOffset(10, 0), Size = UDim2.new(1, -32, 1, 0), TextTruncate = Enum.TextTruncate.AtEnd, Parent = btn,
+	})
+	U.chevron(btn, false, C.SubText, UDim2.new(1, -16, .5, 0))
+	local ctl
+	local function setter(v)
+		if v == nil or not table.find(options, v) then return nil end
+		valueLabel.Text = tostring(v)
+		return v
+	end
+	ctl = self:_register("Dropdown", opts, row, opts.Default or options[1], setter)
+	function ctl:SetOptions(list)
+		options = list
+		if not table.find(options, self.Value) then self:Set(options[1]) end
+	end
+
+	ctl:_conn(btn.Activated, function()
+		local h = math.min(#options * (L.Hit + 2) + 8, L.PopupMax)
+		ui:OpenPopup(btn, math.max(btn.AbsoluteSize.X / U.factor, 144), h, function(frame)
+			local sc = U.scroller({ Parent = frame })
+			U.pad(sc, 4, 4, 4 + L.ScrollBar, 4)
+			U.list(sc, 2)
+			for i, opt in ipairs(options) do
+				local sel = opt == ctl.Value
+				local b = U.button({
+					BackgroundColor3 = C.Accent, BackgroundTransparency = sel and .85 or 1, Size = UDim2.new(1, 0, 0, L.Hit),
+					Text = tostring(opt), TextColor3 = sel and C.Accent or C.Text, LayoutOrder = i, Parent = sc,
+				})
+				U.corner(b, 6)
+				b.Activated:Connect(function()
+					ctl:Set(opt)
+					ui:ClosePopup()
+				end)
+			end
+		end)
+	end)
+	return self
+end
+
+function Section:MultiDropdown(opts)
+	local ui = self.UI
+	local options = opts.Options or {}
+	local row = self:_row(L.Row, false)
+	local label = U.label({ Text = opts.Name, Position = UDim2.fromOffset(4, 0), Size = UDim2.new(1, -152, 1, 0), Parent = row })
+	self:_hook(label, opts.Description)
+	local btn = U.button({
+		BackgroundColor3 = C.Background, AnchorPoint = Vector2.new(1, .5), Position = UDim2.new(1, -4, .5, 0),
+		Size = UDim2.fromOffset(144, L.Hit), Parent = row,
+	})
+	U.corner(btn, 8)
+	U.stroke(btn, C.Stroke)
+	local valueLabel = U.label({
+		Position = UDim2.fromOffset(10, 0), Size = UDim2.new(1, -32, 1, 0), TextTruncate = Enum.TextTruncate.AtEnd, Parent = btn,
+	})
+	U.chevron(btn, false, C.SubText, UDim2.new(1, -16, .5, 0))
+
+	local function clean(v)
+		local out, seen = {}, {}
+		if typeof(v) == "table" then
+			for _, o in ipairs(options) do
+				if table.find(v, o) and not seen[o] then
+					seen[o] = true
+					out[#out + 1] = o
+				end
+			end
+		end
+		return out
+	end
+	local function setter(v)
+		if typeof(v) ~= "table" then return nil end
+		v = clean(v)
+		if #v == 0 then
+			valueLabel.Text = T.None
+		elseif #v <= 2 then
+			valueLabel.Text = table.concat(v, ", ")
+		else
+			valueLabel.Text = #v .. " selecionados"
+		end
+		return v
+	end
+	local ctl = self:_register("MultiDropdown", opts, row, clean(opts.Default or {}), setter)
+	function ctl:SetOptions(list)
+		options = list or {}
+		self:Set(self.Value, true) -- refiltra a selecao sem disparar callback
+	end
+
+	ctl:_conn(btn.Activated, function()
+		local h = math.min(math.max(#options, 1) * (L.Hit + 2) + 8, L.PopupMax)
+		ui:OpenPopup(btn, math.max(btn.AbsoluteSize.X / U.factor, 144), h, function(frame)
+			local sc = U.scroller({ Parent = frame })
+			U.pad(sc, 4, 4, 4 + L.ScrollBar, 4)
+			U.list(sc, 2)
+			local function render()
+				for _, c in ipairs(sc:GetChildren()) do
+					if c:IsA("TextButton") then c:Destroy() end
+				end
+				for i, opt in ipairs(options) do
+					local sel = table.find(ctl.Value, opt) ~= nil
+					local b = U.button({
+						BackgroundColor3 = C.Accent, BackgroundTransparency = sel and .8 or 1, Size = UDim2.new(1, 0, 0, L.Hit),
+						Text = tostring(opt), TextColor3 = sel and C.Accent or C.Text, TextXAlignment = Enum.TextXAlignment.Left,
+						LayoutOrder = i, Parent = sc,
+					})
+					U.corner(b, 6)
+					U.pad(b, 10, 0, 6, 0)
+					b.Activated:Connect(function()
+						local list = {}
+						for _, v in ipairs(ctl.Value) do
+							if v ~= opt then list[#list + 1] = v end
+						end
+						if not sel then list[#list + 1] = opt end
+						ctl:Set(list)
+						render()
+					end)
+				end
+			end
+			render()
+		end)
+	end)
+	return self
+end
+
+function Section:Keybind(opts)
+	local ui = self.UI
+	local row = self:_row(L.Row, false)
+	local label = U.label({ Text = opts.Name, Position = UDim2.fromOffset(4, 0), Size = UDim2.new(1, -112, 1, 0), Parent = row })
+	self:_hook(label, opts.Description)
+	local btn = U.button({
+		BackgroundColor3 = C.Background, AnchorPoint = Vector2.new(1, .5), Position = UDim2.new(1, -4, .5, 0),
+		Size = UDim2.fromOffset(104, L.Hit), TextSize = L.SmallSize + 1, Parent = row,
+	})
+	U.corner(btn, 8)
+	U.stroke(btn, C.Stroke)
+	local function setter(v)
+		if typeof(v) == "EnumItem" then v = v.Name end
+		if v == nil or v == "" then v = "None" end
+		if not validBind(v) then return nil end
+		btn.Text = v == "None" and T.None or v
+		return v
+	end
+	-- opts.Callback dispara ao apertar a tecla; opts.OnChanged ao trocar o bind
+	local ctl = self:_register("Keybind", { Name = opts.Name, Flag = opts.Flag, Callback = opts.OnChanged }, row, opts.Default, setter)
+	ctl.Fire = function()
+		if opts.Callback then task.spawn(opts.Callback, ctl.Value) end
+	end
+
+	local cleared = false
+	btn.InputBegan:Connect(function(input)
+		if U.isPress(input) then cleared = false end
+	end)
+	U.longPress(btn, CONFIG.ClearHold, function()
+		cleared = true
+		ctl:Set("None")
+	end)
+	btn.Activated:Connect(function()
+		if cleared then
+			cleared = false
+			return
+		end
+		btn.Text = T.Press
+		btn.TextColor3 = C.Accent
+		ui.Capture = function(name)
+			ui.Capture = nil
+			btn.TextColor3 = C.Text
+			ctl:Set(name or ctl.Value) -- nil (cancelou) só restaura o texto
+		end
+	end)
+	return self
+end
+
+function Section:Button(opts)
+	local row = self:_row(L.Row, false)
+	local btn = U.button({
+		BackgroundColor3 = C.Background, Position = UDim2.fromOffset(0, 2), Size = UDim2.new(1, 0, 0, L.Hit),
+		Text = opts.Name, Parent = row,
+	})
+	U.corner(btn, 8)
+	U.stroke(btn, C.Stroke)
+	U.pressFx(btn, C.Background)
+	U.hover(btn, C.Background, C.Header)
+	btn.Activated:Connect(function()
+		if opts.Callback then task.spawn(opts.Callback) end
+	end)
+	if opts.Description then
+		U.longPress(btn, CONFIG.Tooltip.Hold, function(input)
+			self.UI:ShowTooltip(opts.Description, U.pointer(input))
+		end)
+	end
+	table.insert(self.UI.Registry, { Name = opts.Name, Tab = self.Tab, Row = row })
+	return self
+end
+
+function Section:TextBox(opts)
+	local row = self:_row(L.Row, false)
+	local label = U.label({ Text = opts.Name, Position = UDim2.fromOffset(4, 0), Size = UDim2.new(.4, -4, 1, 0), Parent = row })
+	self:_hook(label, opts.Description)
+	local holder = U.frame({
+		BackgroundColor3 = C.Background, AnchorPoint = Vector2.new(1, .5), Position = UDim2.new(1, -4, .5, 0),
+		Size = UDim2.new(.6, -8, 0, L.Hit), Parent = row,
+	})
+	U.corner(holder, 8)
+	U.stroke(holder, C.Stroke)
+	local box = U.box({
+		PlaceholderText = opts.Placeholder or "", Position = UDim2.fromOffset(10, 0), Size = UDim2.new(1, -20, 1, 0),
+		TextTruncate = Enum.TextTruncate.AtEnd, Parent = holder,
+	})
+	local function setter(v)
+		v = tostring(v or "")
+		box.Text = v
+		return v
+	end
+	local ctl = self:_register("TextBox", opts, row, opts.Default or "", setter)
+	box.FocusLost:Connect(function() ctl:Set(box.Text) end) -- confirma ao sair do foco (Enter ou teclado fechado)
+	return self
+end
+
+function Section:ColorPicker(opts)
+	local ui = self.UI
+	local hsv = { 0, 0, 1 }
+	if opts.Default and typeof(opts.Default) == "Color3" then
+		hsv[1], hsv[2], hsv[3] = opts.Default:ToHSV()
+	end
+	local fromPicker = false
+	local row = self:_row(L.Row, false)
+	local label = U.label({ Text = opts.Name, Position = UDim2.fromOffset(4, 0), Size = UDim2.new(1, -72, 1, 0), Parent = row })
+	self:_hook(label, opts.Description)
+	local swatch = U.button({
+		AnchorPoint = Vector2.new(1, .5), Position = UDim2.new(1, -4, .5, 0), Size = UDim2.fromOffset(56, L.Hit), Parent = row,
+	})
+	U.corner(swatch, 8)
+	U.stroke(swatch, C.Stroke)
+	local function setter(v)
+		if typeof(v) == "string" then v = U.fromHex(v) end
+		if typeof(v) ~= "Color3" then return nil end
+		if not fromPicker then hsv[1], hsv[2], hsv[3] = v:ToHSV() end
+		swatch.BackgroundColor3 = v
+		return v
+	end
+	local ctl = self:_register("ColorPicker", opts, row, opts.Default or Color3.fromRGB(255, 255, 255), setter)
+
+	swatch.Activated:Connect(function()
+		ui:OpenPopup(swatch, 220, 238, function(frame)
+			local sv = U.frame({
+				BackgroundColor3 = Color3.fromHSV(hsv[1], 1, 1), Position = UDim2.fromOffset(10, 10),
+				Size = UDim2.fromOffset(200, 130), Parent = frame,
+			})
+			U.corner(sv, 6)
+			local white = U.frame({ BackgroundColor3 = C.White, Size = UDim2.fromScale(1, 1), Parent = sv })
+			U.corner(white, 6)
+			create("UIGradient", {
+				Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1) }),
+				Parent = white,
+			})
+			local black = U.frame({ BackgroundColor3 = C.Black, Size = UDim2.fromScale(1, 1), Parent = sv })
+			U.corner(black, 6)
+			create("UIGradient", {
+				Rotation = 90,
+				Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(1, 0) }),
+				Parent = black,
+			})
+			local svCursor = U.frame({
+				BackgroundTransparency = 1, AnchorPoint = Vector2.new(.5, .5), Size = UDim2.fromOffset(14, 14), Parent = sv,
+			})
+			U.corner(svCursor, 7)
+			U.stroke(svCursor, C.White, 2)
+
+			local hue = U.frame({
+				BackgroundColor3 = C.White, Position = UDim2.fromOffset(10, 150), Size = UDim2.fromOffset(200, 24), Parent = frame,
+			})
+			U.corner(hue, 6)
+			local kps = {}
+			for i = 0, 6 do
+				kps[#kps + 1] = ColorSequenceKeypoint.new(i / 6, Color3.fromHSV(i == 6 and 0 or i / 6, 1, 1))
+			end
+			create("UIGradient", { Color = ColorSequence.new(kps), Parent = hue })
+			local hueCursor = U.frame({
+				BackgroundColor3 = C.White, AnchorPoint = Vector2.new(.5, .5),
+				Size = UDim2.fromOffset(6, 30), Parent = hue,
+			})
+			U.corner(hueCursor, 3)
+			U.stroke(hueCursor, C.Black, 1)
+
+			local preview = U.frame({
+				Position = UDim2.fromOffset(10, 190), Size = UDim2.fromOffset(40, L.Hit - 4), Parent = frame,
+			})
+			U.corner(preview, 8)
+			U.stroke(preview, C.Stroke)
+			local hexHolder = U.frame({
+				BackgroundColor3 = C.Background, Position = UDim2.fromOffset(58, 190), Size = UDim2.fromOffset(152, L.Hit - 4), Parent = frame,
+			})
+			U.corner(hexHolder, 8)
+			U.stroke(hexHolder, C.Stroke)
+			local hexBox = U.box({
+				Font = F.Medium, TextXAlignment = Enum.TextXAlignment.Center, PlaceholderText = "#RRGGBB",
+				Size = UDim2.fromScale(1, 1), Parent = hexHolder,
+			})
+			local hexBoxFocused = false
+			hexBox.Focused:Connect(function() hexBoxFocused = true end)
+			hexBox.FocusLost:Connect(function() hexBoxFocused = false end)
+
+			local function refresh()
+				sv.BackgroundColor3 = Color3.fromHSV(hsv[1], 1, 1)
+				svCursor.Position = UDim2.fromScale(hsv[2], 1 - hsv[3])
+				hueCursor.Position = UDim2.fromScale(hsv[1], .5)
+				preview.BackgroundColor3 = ctl.Value
+				if not hexBoxFocused then hexBox.Text = U.toHex(ctl.Value) end
+			end
+			local function apply()
+				fromPicker = true
+				ctl:Set(Color3.fromHSV(hsv[1], hsv[2], hsv[3]))
+				fromPicker = false
+				refresh()
+			end
+			local function svMove(input)
+				local p = U.pointer(input)
+				hsv[2] = math.clamp((p.X - sv.AbsolutePosition.X) / sv.AbsoluteSize.X, 0, 1)
+				hsv[3] = 1 - math.clamp((p.Y - sv.AbsolutePosition.Y) / sv.AbsoluteSize.Y, 0, 1)
+				apply()
+			end
+			local function hueMove(input)
+				hsv[1] = math.clamp((U.pointer(input).X - hue.AbsolutePosition.X) / hue.AbsoluteSize.X, 0, .999)
+				apply()
+			end
+			U.drag(sv, { start = svMove, move = svMove })
+			U.drag(hue, { start = hueMove, move = hueMove })
+			hexBox.FocusLost:Connect(function()
+				local c = U.fromHex(hexBox.Text)
+				if c then ctl:Set(c) end
+				refresh()
+			end)
+			refresh()
+		end)
+	end)
+	return self
+end
+
+function Section:Label(textOrOpts)
+	local opts = type(textOrOpts) == "table" and textOrOpts or { Text = textOrOpts }
+	local row = self:_row(28, false)
+	row.AutomaticSize = Enum.AutomaticSize.Y
+	U.pad(row, 4, 5, 4, 5)
+	local label = U.label({
+		Text = opts.Text or "", TextColor3 = C.SubText, TextWrapped = true,
+		Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, Parent = row,
+	})
+	self:_hook(label, opts.Description)
+	self.Last = { Row = row, SetText = function(_, t) label.Text = t end }
+	return self
+end
+
+function Section:Divider()
+	local row = self:_row(10, false)
+	U.frame({
+		BackgroundColor3 = C.Stroke, AnchorPoint = Vector2.new(0, .5), Position = UDim2.fromScale(0, .5),
+		Size = UDim2.new(1, 0, 0, 1), Parent = row,
+	})
+	return self
+end
+
+function Section:Destroy()
+	local flags = {}
+	for _, e in ipairs(self.UI.Registry) do
+		if e.Tab == self then table.insert(flags, e.Id) end
+	end
+	for _, flag in ipairs(flags) do
+		local c = self.UI.Controls[flag]
+		if c then c:Destroy() end
+	end
+	if self.Card then pcall(function() self.Card:Destroy() end) end
+end
+
+
+-- src/modules/ConfirmDialog.lua  (F-073)
+-- Dialogo de confirmacao para acao destrutiva.
+-- opts: { Title, Text, OnConfirm, OnCancel, ConfirmText?, CancelText? }
+
+local function Section_ConfirmDialog(self, opts)
+	local ui = self.UI
+	ui:OpenPopup(self.Last and self.Last.Row or ui.Canvas, 260, 120, function(frame)
+		U.pad(frame, 14, 12, 14, 12)
+		U.list(frame, 8)
+		U.label({
+			Text = opts.Title or "Confirmar", Font = F.Bold, TextSize = L.TextSize,
+			TextColor3 = C.Text, Size = UDim2.new(1, 0, 0, 22), Parent = frame,
+		})
+		U.label({
+			Text = opts.Text or "Tem certeza que deseja continuar?", TextColor3 = C.SubText,
+			TextSize = L.SmallSize, TextWrapped = true, Size = UDim2.new(1, 0, 0, 44), Parent = frame,
+		})
+		local botoes = U.frame({
+			BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, L.Hit), Parent = frame,
+		})
+		U.list(botoes, 8, Enum.FillDirection.Horizontal)
+		local cancel = U.button({
+			BackgroundColor3 = C.Surface, Size = UDim2.new(0, 100, 0, L.Hit),
+			Text = opts.CancelText or "Cancelar", TextColor3 = C.Text, Parent = botoes,
+		})
+		U.corner(cancel, 8)
+		U.stroke(cancel, C.Stroke)
+		local confirm = U.button({
+			BackgroundColor3 = C.Accent, Size = UDim2.new(0, 100, 0, L.Hit),
+			Text = opts.ConfirmText or "Confirmar", TextColor3 = C.Text, Parent = botoes,
+		})
+		U.corner(confirm, 8)
+		U.stroke(confirm, C.Stroke)
+		ui:_conn(cancel.Activated, function()
+			ui:ClosePopup()
+			if opts.OnCancel then task.spawn(opts.OnCancel) end
+		end)
+		ui:_conn(confirm.Activated, function()
+			ui:ClosePopup()
+			if opts.OnConfirm then task.spawn(opts.OnConfirm) end
+		end)
+	end)
+	return self
+end
+
+Section.ConfirmDialog = Section_ConfirmDialog
+-- src/modules/ContextMenu.lua  (F-075)
+-- Menu de contexto acionado por clique longo ou botao direito.
+-- opts: { Items: {{Name, Callback}}, Anchor (GuiObject), Width? }
+
+local function Section_ContextMenu(self, opts)
+	local ui = self.UI
+	local anchor = opts.Anchor or (self.Last and self.Last.Row)
+	local items = opts.Items or {}
+	local w = opts.Width or 160
+	local h = math.min(#items * (L.Hit + 2) + 8, L.PopupMax)
+	if #items == 0 then return self end
+	ui:OpenPopup(anchor, w, h, function(frame)
+		U.pad(frame, 4, 4, 4 + L.ScrollBar, 4)
+		U.list(frame, 2)
+		for _, item in ipairs(items) do
+			local b = U.button({
+				BackgroundColor3 = C.Surface, Size = UDim2.new(1, 0, 0, L.Hit),
+				Text = item.Name, TextColor3 = C.Text, TextXAlignment = Enum.TextXAlignment.Left,
+				Parent = frame,
+			})
+			U.corner(b, 6)
+			U.stroke(b, C.Stroke)
+			ui:_conn(b.Activated, function()
+				ui:ClosePopup()
+				if item.Callback then task.spawn(item.Callback) end
+			end)
+		end
+	end)
+	return self
+end
+
+Section.ContextMenu = Section_ContextMenu
+-- src/modules/GradientPicker.lua  (F-057)
+-- Seletor de gradiente linear (cor inicial, cor final, angulo).
+-- opts: { Name, Default: {Color3, Color3, number?}, Description?, Callback? }
+-- Valor: { corA: Color3, corB: Color3, angulo: number }
+
+local function Section_GradientPicker(self, opts)
+	local ui = self.UI
+	local default = opts.Default or { Color3.fromRGB(255, 240, 246), Color3.fromRGB(233, 64, 140), 90 }
+	local corA, corB, angulo = default[1], default[2], default[3] or 90
+
+	local row = self:_row(L.Row + 60, false)
+	local label = U.label({
+		Text = opts.Name, Position = UDim2.fromOffset(4, 0),
+		Size = UDim2.new(1, -72, 0, L.Hit), Parent = row,
+	})
+	self:_hook(label, opts.Description)
+
+	local preview = U.frame({
+		BackgroundColor3 = C.Background, AnchorPoint = Vector2.new(1, .5),
+		Position = UDim2.new(1, -4, .5, 0), Size = UDim2.fromOffset(56, L.Hit), Parent = row,
+	})
+	U.corner(preview, 8)
+	U.stroke(preview, C.Stroke)
+
+	local swatchA = U.button({
+		BackgroundColor3 = corA, AnchorPoint = Vector2.new(1, .5),
+		Position = UDim2.new(1, -66, 0, L.Hit + 6), Size = UDim2.fromOffset(28, L.Hit - 4), Parent = row,
+	})
+	U.corner(swatchA, 6)
+	U.stroke(swatchA, C.Stroke)
+	local swatchB = U.button({
+		BackgroundColor3 = corB, AnchorPoint = Vector2.new(1, .5),
+		Position = UDim2.new(1, -34, 0, L.Hit + 6), Size = UDim2.fromOffset(28, L.Hit - 4), Parent = row,
+	})
+	U.corner(swatchB, 6)
+	U.stroke(swatchB, C.Stroke)
+
+	local ctl
+	local function applyGrad()
+		local grad = create("UIGradient", {
+			Color = ColorSequence.new({
+				ColorSequenceKeypoint.new(0, corA),
+				ColorSequenceKeypoint.new(1, corB),
+			}),
+			Rotation = angulo, Parent = preview,
+		})
+		-- remove gradiente anterior, se houver
+		for _, c in ipairs(preview:GetChildren()) do
+			if c ~= grad and c:IsA("UIGradient") then c:Destroy() end
+		end
+	end
+	local function render()
+		swatchA.BackgroundColor3 = corA
+		swatchB.BackgroundColor3 = corB
+		applyGrad()
+	end
+	local function setter(v)
+		if typeof(v) ~= "table" or #v < 2 then return nil end
+		corA = typeof(v[1]) == "Color3" and v[1] or corA
+		corB = typeof(v[2]) == "Color3" and v[2] or corB
+		angulo = tonumber(v[3]) or angulo
+		ctl.Value = { corA, corB, angulo }
+		ui.Flags[ctl.Flag] = { corA, corB, angulo }
+		render()
+		return { corA, corB, angulo }
+	end
+
+	ctl = self:_register("GradientPicker", opts, row, { corA, corB, angulo }, setter)
+	render()
+
+	local function abrirCor(swatch, alvo)
+		return function()
+			ui:OpenPopup(swatch, 220, 238, function(frame)
+				local hsv = { corA:ToHSV() }
+				if alvo == "B" then hsv = { corB:ToHSV() } end
+				local sv = U.frame({
+					BackgroundColor3 = Color3.fromHSV(hsv[1], 1, 1), Position = UDim2.fromOffset(10, 10),
+					Size = UDim2.fromOffset(200, 130), Parent = frame,
+				})
+				U.corner(sv, 6)
+				local white = U.frame({ BackgroundColor3 = C.White, Size = UDim2.fromScale(1, 1), Parent = sv })
+				U.corner(white, 6)
+				create("UIGradient", {
+					Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1) }),
+					Parent = white,
+				})
+				local black = U.frame({ BackgroundColor3 = C.Black, Size = UDim2.fromScale(1, 1), Parent = sv })
+				U.corner(black, 6)
+				create("UIGradient", {
+					Rotation = 90,
+					Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(1, 0) }),
+					Parent = black,
+				})
+				local cursor = U.frame({
+					BackgroundTransparency = 1, AnchorPoint = Vector2.new(.5, .5), Size = UDim2.fromOffset(14, 14), Parent = sv,
+				})
+				U.corner(cursor, 7)
+				U.stroke(cursor, C.White, 2)
+				local hue = U.frame({
+					BackgroundColor3 = C.White, Position = UDim2.fromOffset(10, 150), Size = UDim2.fromOffset(200, 24), Parent = frame,
+				})
+				U.corner(hue, 6)
+				local kps = {}
+				for i = 0, 6 do
+					kps[#kps + 1] = ColorSequenceKeypoint.new(i / 6, Color3.fromHSV(i == 6 and 0 or i / 6, 1, 1))
+				end
+				create("UIGradient", { Color = ColorSequence.new(kps), Parent = hue })
+				local hCursor = U.frame({
+					BackgroundColor3 = C.White, AnchorPoint = Vector2.new(.5, .5), Size = UDim2.fromOffset(6, 30), Parent = hue,
+				})
+				U.corner(hCursor, 3)
+				U.stroke(hCursor, C.Black, 1)
+				local function refresh()
+					sv.BackgroundColor3 = Color3.fromHSV(hsv[1], 1, 1)
+					cursor.Position = UDim2.fromScale(hsv[2], 1 - hsv[3])
+					hCursor.Position = UDim2.fromScale(hsv[1], .5)
+				end
+				local function apply()
+					local c = Color3.fromHSV(hsv[1], hsv[2], hsv[3])
+					if alvo == "A" then corA = c else corB = c end
+					ctl:Set({ corA, corB, angulo })
+					refresh()
+				end
+				U.drag(sv, { start = apply, move = apply })
+				U.drag(hue, { start = function(i) hsv[1] = math.clamp((U.pointer(i).X - hue.AbsolutePosition.X) / hue.AbsoluteSize.X, 0, .999); apply() end, move = function(i) hsv[1] = math.clamp((U.pointer(i).X - hue.AbsolutePosition.X) / hue.AbsoluteSize.X, 0, .999); apply() end })
+				refresh()
+			end)
+		end
+	end
+
+	ctl:_conn(swatchA.Activated, abrirCor(swatchA, "A"))
+	ctl:_conn(swatchB.Activated, abrirCor(swatchB, "B"))
+
+	return self
+end
+
+Section.GradientPicker = Section_GradientPicker
+-- src/modules/Modal.lua  (F-074)
+-- Modal generico com titulo, conteudo (build fn) e botoes de acao.
+-- opts: { Title, OnClose?, Buttons: {{Text, Callback, Primary?}}, Build?(frame) }
+
+local function Section_Modal(self, opts)
+	local ui = self.UI
+	local h = opts.Height or 200
+	local w = opts.Width or 320
+	ui:OpenPopup(self.Last and self.Last.Row or ui.Canvas, w, h, function(frame)
+		U.pad(frame, 14, 12, 14, 12)
+		U.list(frame, 8)
+		U.label({
+			Text = opts.Title or "Modal", Font = F.Bold, TextSize = L.TextSize,
+			TextColor3 = C.Text, Size = UDim2.new(1, 0, 0, 22), Parent = frame,
+		})
+		if opts.Build then opts.Build(frame) end
+		if opts.Buttons then
+			local botoes = U.frame({
+				BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, L.Hit), Parent = frame,
+			})
+			U.list(botoes, 8, Enum.FillDirection.Horizontal)
+			for _, bt in ipairs(opts.Buttons) do
+				local b = U.button({
+					BackgroundColor3 = bt.Primary and C.Accent or C.Surface,
+					Size = UDim2.new(0, 90, 0, L.Hit), Text = bt.Text,
+					TextColor3 = C.Text, Parent = botoes,
+				})
+				U.corner(b, 8)
+				U.stroke(b, C.Stroke)
+				ui:_conn(b.Activated, function()
+					ui:ClosePopup()
+					if bt.Callback then task.spawn(bt.Callback) end
+				end)
+			end
+		end
+		-- fechar clicando fora (blocker ja fecha via OpenPopup)
+	end)
+	return self
+end
+
+Section.Modal = Section_Modal
+-- src/modules/NumberInput.lua  (F-052)
+-- Campo numerico com incremento/decremento e limites.
+-- opts: { Name, Min, Max, Step, Default, Suffix?, Description?, Callback? }
+-- Valor: numero
+
+local function Section_NumberInput(self, opts)
+	local ui = self.UI
+	local min, max, step = opts.Min or 0, opts.Max or 100, opts.Step or 1
+	local suffix = opts.Suffix or ""
+	local function decimals(n)
+		local d = tostring(n):match("%.(%d+)")
+		return d and #d or 0
+	end
+	local dec = math.max(decimals(step), decimals(min), decimals(max))
+	local function snap(v)
+		v = math.clamp(tonumber(v) or min, min, max)
+		v = min + math.floor((v - min) / step + .5) * step
+		local m = 10 ^ dec
+		return math.clamp(math.floor(v * m + .5) / m, min, max)
+	end
+
+	local row = self:_row(L.Row, false)
+	local label = U.label({
+		Text = opts.Name, Position = UDim2.fromOffset(4, 0),
+		Size = UDim2.new(1, -110, 1, 0), Parent = row,
+	})
+	self:_hook(label, opts.Description)
+
+	local holder = U.frame({
+		BackgroundColor3 = C.Background, AnchorPoint = Vector2.new(1, .5),
+		Position = UDim2.new(1, -4, .5, 0), Size = UDim2.fromOffset(90, L.Hit), Parent = row,
+	})
+	U.corner(holder, 8)
+	U.stroke(holder, C.Stroke)
+	U.list(holder, 0, Enum.FillDirection.Horizontal)
+
+	local btnDec = U.button({
+		BackgroundColor3 = C.Surface, Size = UDim2.fromOffset(L.Hit, L.Hit), Text = "-",
+		TextColor3 = C.Text, Font = F.Bold, TextSize = L.TextSize, Parent = holder,
+	})
+	U.corner(btnDec, 6)
+	local box = U.box({
+		BackgroundTransparency = 1, Font = F.Medium, TextSize = L.TextSize,
+		TextColor3 = C.Text, PlaceholderColor3 = C.SubText, TextXAlignment = Enum.TextXAlignment.Center,
+		Size = UDim2.new(1, -L.Hit * 2, 1, 0), Parent = holder,
+	})
+	local btnInc = U.button({
+		BackgroundColor3 = C.Surface, Size = UDim2.fromOffset(L.Hit, L.Hit), Text = "+",
+		TextColor3 = C.Text, Font = F.Bold, TextSize = L.TextSize, Parent = holder,
+	})
+	U.corner(btnInc, 6)
+
+	local ctl
+	local function render()
+		box.Text = tostring(ctl.Value) .. suffix
+	end
+	local function setter(v)
+		local n = snap(v)
+		ctl.Value = n
+		ui.Flags[ctl.Flag] = n
+		render()
+		return n
+	end
+
+	ctl = self:_register("NumberInput", opts, row, snap(opts.Default or min), setter)
+	render()
+
+	local function change(delta)
+		ctl:Set(snap(ctl.Value + delta))
+	end
+	ctl:_conn(btnDec.Activated, function() change(-step) end)
+	ctl:_conn(btnInc.Activated, function() change(step) end)
+	ctl:_conn(box.FocusLost, function()
+		ctl:Set(tonumber(box.Text:gsub(suffix, "")) or ctl.Value)
+	end)
+
+	U.pressFx(btnDec, C.Surface)
+	U.pressFx(btnInc, C.Surface)
+
+	return self
+end
+
+Section.NumberInput = Section_NumberInput
+-- src/modules/ProgressBar.lua  (F-058)
+-- Barra de progresso visual, somente leitura, com texto opcional.
+-- opts: { Name, Value, Min, Max, Text?, Suffix?, Description? }
+-- Metodo: ctl:SetValue(v) / ctl:SetText(t)
+
+local function Section_ProgressBar(self, opts)
+	local ui = self.UI
+	local min, max = opts.Min or 0, opts.Max or 100
+	local value = math.clamp(tonumber(opts.Value) or min, min, max)
+	local text = opts.Text or ""
+
+	local row = self:_row(L.Row, false)
+	local label = U.label({
+		Text = opts.Name, Position = UDim2.fromOffset(4, 0),
+		Size = UDim2.new(0, 90, 1, 0), Parent = row,
+	})
+	self:_hook(label, opts.Description)
+
+	local barHolder = U.frame({
+		BackgroundColor3 = C.Stroke, AnchorPoint = Vector2.new(1, .5),
+		Position = UDim2.new(1, -4, .5, 0), Size = UDim2.new(1, -100, 0, 10), Parent = row,
+	})
+	U.corner(barHolder, 5)
+	local fill = U.frame({ BackgroundColor3 = C.Accent, Size = UDim2.fromScale(0, 1), Parent = barHolder })
+	U.corner(fill, 5)
+
+	local txtLabel = U.label({
+		Text = text, TextColor3 = C.SubText, TextSize = L.SmallSize,
+		Position = UDim2.fromOffset(4, L.Hit + 2), Size = UDim2.new(1, -8, 0, 16), Parent = row,
+	})
+
+	local ctl
+	local function render()
+		local r = max > min and (ctl.Value - min) / (max - min) or 0
+		fill.Size = UDim2.fromScale(math.clamp(r, 0, 1), 1)
+	end
+	local function setter(v)
+		if typeof(v) ~= "number" then return nil end
+		ctl.Value = math.clamp(v, min, max)
+		ui.Flags[ctl.Flag] = ctl.Value
+		render()
+		return ctl.Value
+	end
+
+	ctl = self:_register("ProgressBar", opts, row, value, setter)
+	ctl:SetValue = function(v) ctl:Set(v) end
+	ctl.SetText = function(t)
+		text = tostring(t or "")
+		txtLabel.Text = text
+	end
+	render()
+	txtLabel.Text = text
+
+	return self
+end
+
+Section.ProgressBar = Section_ProgressBar
+-- src/modules/RadioGroup.lua  (F-054)
+-- Grupo de opcoes de selecionar unica com estado visual de radio.
+-- opts: { Name, Options: {string}, Default, Description?, Callback? }
+-- Valor: string (opcao selecionada)
+
+local function Section_RadioGroup(self, opts)
+	local ui = self.UI
+	local options = opts.Options or {}
+	local row = self:_row(L.Row + (#options - 1) * (L.Row + 4), false)
+	local label = U.label({
+		Text = opts.Name, Position = UDim2.fromOffset(4, 0),
+		Size = UDim2.new(0, 110, 1, 0), Parent = row,
+	})
+	self:_hook(label, opts.Description)
+
+	local holder = U.frame({
+		BackgroundTransparency = 1, AnchorPoint = Vector2.new(1, .5),
+		Position = UDim2.new(1, -4, .5, 0), Size = UDim2.new(1, -120, 1, 0), Parent = row,
+	})
+	U.list(holder, 4)
+
+	local ctl
+	local buttons = {}
+	local function render()
+		for i, b in ipairs(buttons) do
+			local sel = options[i] == ctl.Value
+			local dot = b:FindFirstChildOfClass("Frame") or b:FindFirstChild("Dot")
+			if dot then
+				U.tween(dot, A.Fast, { BackgroundTransparency = sel and 0 or 1 })
+			end
+			U.tween(b, A.Fast, { TextColor3 = sel and C.Accent or C.SubText })
+		end
+	end
+	local function setter(v)
+		if not table.find(options, v) then return nil end
+		ctl.Value = v
+		ui.Flags[ctl.Flag] = v
+		render()
+		return v
+	end
+
+	ctl = self:_register("RadioGroup", opts, row, opts.Default or options[1], setter)
+	render()
+
+	for i, opt in ipairs(options) do
+		local b = U.button({
+			BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, L.Row),
+			Text = tostring(opt), TextColor3 = C.SubText, Font = F.Medium,
+			TextXAlignment = Enum.TextXAlignment.Left, Parent = holder,
+		})
+		local dot = U.frame({
+			Name = "Dot", BackgroundColor3 = C.Accent, AnchorPoint = Vector2.new(0, .5),
+			Position = UDim2.fromOffset(0, .5 * L.Row), Size = UDim2.fromOffset(14, 14), Parent = b,
+		})
+		U.corner(dot, 7)
+		U.stroke(dot, C.Stroke)
+		ctl:_conn(b.Activated, function() ctl:Set(opt) end)
+		table.insert(buttons, b)
+	end
+
+	render()
+	return self
+end
+
+Section.RadioGroup = Section_RadioGroup
+-- src/modules/RangeSlider.lua  (F-051)
+-- Intervalo [min, max] com dois cursores na mesma barra.
+-- opts: { Name, Min, Max, Step, Default: {min, max}, Suffix?, Description?, Callback? }
+-- Valor: { min, max }
+
+local function Section_RangeSlider(self, opts)
+	local ui = self.UI
+	local min, max, step = opts.Min or 0, opts.Max or 100, opts.Step or 1
+	local suffix = opts.Suffix or ""
+	local function decimals(n)
+		local d = tostring(n):match("%.(%d+)")
+		return d and #d or 0
+	end
+	local dec = math.max(decimals(step), decimals(min), decimals(max))
+	local default = opts.Default or { min, max }
+	local dmin = math.clamp(tonumber(default[1]) or min, min, max)
+	local dmax = math.clamp(tonumber(default[2]) or max, min, max)
+	if dmax < dmin then dmax = dmin end
+
+	local row = self:_row(L.Hit + 56, false)
+	local label = U.label({
+		Text = opts.Name, Position = UDim2.fromOffset(4, 0),
+		Size = UDim2.new(1, -120, 0, L.Hit), Parent = row,
+	})
+	self:_hook(label, opts.Description)
+
+	local box = U.box({
+		BackgroundColor3 = C.Background, BackgroundTransparency = 0, Font = F.Medium,
+		TextXAlignment = Enum.TextXAlignment.Center, AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -4, 0, 0), Size = UDim2.fromOffset(112, L.Hit), Parent = row,
+	})
+	U.corner(box, 8)
+	U.stroke(box, C.Stroke)
+
+	local hit = create("Frame", {
+		BackgroundTransparency = 1, Position = UDim2.fromOffset(4, L.Hit + 6),
+		Size = UDim2.new(1, -8, 0, 34), Parent = row,
+	})
+	local bar = U.frame({
+		BackgroundColor3 = C.Stroke, AnchorPoint = Vector2.new(0, .5), Position = UDim2.fromScale(0, .5),
+		Size = UDim2.new(1, 0, 0, 6), Parent = hit,
+	})
+	U.corner(bar, 3)
+	local fill = U.frame({ BackgroundColor3 = C.Accent, Size = UDim2.fromScale(0, 1), Parent = bar })
+	U.corner(fill, 3)
+
+	local knobL = U.frame({
+		BackgroundColor3 = C.Knob, AnchorPoint = Vector2.new(.5, .5),
+		Position = UDim2.fromScale(0, .5), Size = UDim2.fromOffset(16, 16), Parent = bar,
+	})
+	U.corner(knobL, 8)
+	local knobR = U.frame({
+		BackgroundColor3 = C.Knob, AnchorPoint = Vector2.new(.5, .5),
+		Position = UDim2.fromScale(1, .5), Size = UDim2.fromOffset(16, 16), Parent = bar,
+	})
+	U.corner(knobR, 8)
+
+	local function snap(v)
+		v = math.clamp(v, min, max)
+		v = min + math.floor((v - min) / step + .5) * step
+		local m = 10 ^ dec
+		return math.clamp(math.floor(v * m + .5) / m, min, max)
+	end
+
+	local ctl
+	local function render()
+		local rL = max > min and (ctl.Value[1] - min) / (max - min) or 0
+		local rR = max > min and (ctl.Value[2] - min) / (max - min) or 0
+		fill.Position = UDim2.fromScale(rL, 0)
+		fill.Size = UDim2.fromScale(math.max(0, rR - rL), 1)
+		knobL.Position = UDim2.fromScale(rL, .5)
+		knobR.Position = UDim2.fromScale(rR, .5)
+		box.Text = string.format("%s%s - %s%s", tostring(ctl.Value[1]), suffix, tostring(ctl.Value[2]), suffix)
+	end
+
+	local function setter(v)
+		if typeof(v) ~= "table" or #v < 2 then return nil end
+		local a = snap(tonumber(v[1]) or ctl.Value[1])
+		local b = snap(tonumber(v[2]) or ctl.Value[2])
+		if b < a then b = a end
+		ctl.Value = { a, b }
+		render()
+		return { a, b }
+	end
+
+	ctl = self:_register("RangeSlider", opts, row, { dmin, dmax }, setter)
+	render()
+
+	local page = self.Tab.Page
+	local activeKnob = nil
+	local function selectKnob(input)
+		local p = U.pointer(input)
+		local dL = (p - knobL.AbsolutePosition - Vector2.new(8, 8)).Magnitude
+		local dR = (p - knobR.AbsolutePosition - Vector2.new(8, 8)).Magnitude
+		activeKnob = (dL <= dR) and knobL or knobR
+	end
+
+	local function fromInput(input)
+		if not activeKnob then return end
+		local r = (U.pointer(input).X - bar.AbsolutePosition.X) / math.max(1, bar.AbsoluteSize.X)
+		r = math.clamp(r, 0, 1)
+		local v = min + (max - min) * r
+		local a, b = ctl.Value[1], ctl.Value[2]
+		if activeKnob == knobL then
+			a = math.min(snap(v), b)
+		else
+			b = math.max(snap(v), a)
+		end
+		ctl:Set({ a, b })
+	end
+
+	U.drag(hit, {
+		start = function(input)
+			selectKnob(input)
+			page.ScrollingEnabled = false
+			fromInput(input)
+		end,
+		move = fromInput,
+		stop = function()
+			activeKnob = nil
+			page.ScrollingEnabled = true
+		end,
+	})
+
+	ctl:_conn(box.FocusLost, function()
+		local a, b = box.Text:match("([%d%.%-]+)%s*%-%s*([%d%.%-]+)")
+		if a and b then ctl:Set({ tonumber(a), tonumber(b) }) end
+	end)
+
+	return self
+end
+
+Section.RangeSlider = Section_RangeSlider
+-- src/modules/SegmentedControl.lua  (F-053)
+-- Botoes mutuamente exclusivos para escolher uma de N opcoes.
+-- opts: { Name, Options: {string}, Default, Description?, Callback? }
+-- Valor: string (opcao selecionada)
+
+local function Section_SegmentedControl(self, opts)
+	local ui = self.UI
+	local options = opts.Options or {}
+	local row = self:_row(L.Row, false)
+	local label = U.label({
+		Text = opts.Name, Position = UDim2.fromOffset(4, 0),
+		Size = UDim2.new(0, 110, 1, 0), Parent = row,
+	})
+	self:_hook(label, opts.Description)
+
+	local holder = U.frame({
+		BackgroundColor3 = C.Background, AnchorPoint = Vector2.new(1, .5),
+		Position = UDim2.new(1, -4, .5, 0), Size = UDim2.new(1, -120, 0, L.Hit), Parent = row,
+	})
+	U.corner(holder, 8)
+	U.stroke(holder, C.Stroke)
+	U.list(holder, 0, Enum.FillDirection.Horizontal)
+
+	local ctl
+	local buttons = {}
+	local function render()
+		for i, b in ipairs(buttons) do
+			local sel = options[i] == ctl.Value
+			U.tween(b, A.Fast, {
+				BackgroundColor3 = sel and C.Accent or C.Surface,
+				BackgroundTransparency = sel and 0 or 1,
+				TextColor3 = sel and C.Text or C.SubText,
+			})
+		end
+	end
+	local function setter(v)
+		if not table.find(options, v) then return nil end
+		ctl.Value = v
+		ui.Flags[ctl.Flag] = v
+		render()
+		return v
+	end
+
+	ctl = self:_register("SegmentedControl", opts, row, opts.Default or options[1], setter)
+	render()
+
+	for i, opt in ipairs(options) do
+		local b = U.button({
+			BackgroundColor3 = C.Surface, BackgroundTransparency = 1,
+			Size = UDim2.new(1, 0, 1, 0), Text = tostring(opt),
+			TextColor3 = C.SubText, Font = F.Medium, TextSize = L.TextSize, Parent = holder,
+		})
+		U.corner(b, 6)
+		ctl:_conn(b.Activated, function() ctl:Set(opt) end)
+		table.insert(buttons, b)
+	end
+
+	return self
+end
+
+Section.SegmentedControl = Section_SegmentedControl
+-- src/modules/Sparkline.lua  (F-059)
+-- Mini-grafico de linha de valores (ex: FPS ao longo do tempo).
+-- opts: { Name, Points: {number}, Min?, Max?, Color?, Description? }
+-- Metodo: ctl:Push(v) adiciona ponto; ctl:SetPoints({n}) substitui
+
+local function Section_Sparkline(self, opts)
+	local ui = self.UI
+	local points = opts.Points or {}
+	local minV, maxV = opts.Min, opts.Max
+	local cor = opts.Color or C.Accent
+
+	local row = self:_row(L.Row + 40, false)
+	local label = U.label({
+		Text = opts.Name, Position = UDim2.fromOffset(4, 0),
+		Size = UDim2.new(1, -72, 0, L.Hit), Parent = row,
+	})
+	self:_hook(label, opts.Description)
+
+	local holder = U.frame({
+		BackgroundColor3 = C.Background, AnchorPoint = Vector2.new(1, .5),
+		Position = UDim2.new(1, -4, .5, 0), Size = UDim2.fromOffset(64, L.Hit + 40), Parent = row,
+	})
+	U.corner(holder, 8)
+	U.stroke(holder, C.Stroke)
+
+	local ctl
+	local bars = {}
+	local function render()
+		local mn, mx = minV, maxV
+		if #points > 0 then
+			if not mn then mn = unpack(points)
+				for _, v in ipairs(points) do if v < mn then mn = v end end
+			if not mx then mx = unpack(points)
+				for _, v in ipairs(points) do if v > mx then mx = v end end
+		end
+		if mn == mx then mx = mn + 1 end
+		local n = math.max(#points, #bars)
+		for i = 1, n do
+			local b = bars[i]
+			if not b then
+				b = U.frame({ BackgroundColor3 = cor, Size = UDim2.fromScale(1 / n, 1), Parent = holder })
+				U.corner(b, 2)
+				bars[i] = b
+			end
+			local v = points[i] or mn
+			local r = (v - mn) / (mx - mn)
+			b.Size = UDim2.fromScale(1 / n, math.clamp(r, 0, 1))
+			b.Position = UDim2.fromScale((i - 1) / n, 1 - math.clamp(r, 0, 1))
+		end
+		for i = #points + 1, #bars do
+			bars[i]:Destroy()
+		end
+		while #bars > #points do table.remove(bars) end
+	end
+	local function setter(v)
+		if typeof(v) ~= "table" then return nil end
+		points = v
+		ctl.Points = points
+		ui.Flags[ctl.Flag] = points
+		render()
+		return points
+	end
+
+	ctl = self:_register("Sparkline", opts, row, points, setter)
+	ctl.Points = points
+	ctl.Push = function(v)
+		table.insert(points, tonumber(v) or 0)
+		if #points > 40 then table.remove(points, 1) end
+		ctl.Points = points
+		ui.Flags[ctl.Flag] = points
+		render()
+	end
+	render()
+
+	return self
+end
+
+Section.Sparkline = Section_Sparkline
+-- src/modules/Stepper.lua  (F-055)
+-- Ajuste fino de valor numerico com botoes -/+ e passo configuravel.
+-- opts: { Name, Min, Max, Step, Default, Suffix?, Description?, Callback? }
+-- Valor: numero
+
+local function Section_Stepper(self, opts)
+	local ui = self.UI
+	local min, max, step = opts.Min or 0, opts.Max or 100, opts.Step or 1
+	local suffix = opts.Suffix or ""
+	local function decimals(n)
+		local d = tostring(n):match("%.(%d+)")
+		return d and #d or 0
+	end
+	local dec = math.max(decimals(step), decimals(min), decimals(max))
+	local function snap(v)
+		v = math.clamp(tonumber(v) or min, min, max)
+		v = min + math.floor((v - min) / step + .5) * step
+		local m = 10 ^ dec
+		return math.clamp(math.floor(v * m + .5) / m, min, max)
+	end
+
+	local row = self:_row(L.Row, false)
+	local label = U.label({
+		Text = opts.Name, Position = UDim2.fromOffset(4, 0),
+		Size = UDim2.new(1, -130, 1, 0), Parent = row,
+	})
+	self:_hook(label, opts.Description)
+
+	local holder = U.frame({
+		BackgroundColor3 = C.Background, AnchorPoint = Vector2.new(1, .5),
+		Position = UDim2.new(1, -4, .5, 0), Size = UDim2.fromOffset(104, L.Hit), Parent = row,
+	})
+	U.corner(holder, 8)
+	U.stroke(holder, C.Stroke)
+	U.list(holder, 0, Enum.FillDirection.Horizontal)
+
+	local btnDec = U.button({
+		BackgroundColor3 = C.Surface, Size = UDim2.fromOffset(34, L.Hit), Text = "-",
+		TextColor3 = C.Text, Font = F.Bold, TextSize = L.TextSize, Parent = holder,
+	})
+	U.corner(btnDec, 6)
+	local box = U.box({
+		BackgroundTransparency = 1, Font = F.Medium, TextSize = L.TextSize,
+		TextColor3 = C.Text, PlaceholderColor3 = C.SubText, TextXAlignment = Enum.TextXAlignment.Center,
+		Size = UDim2.new(1, -68, 1, 0), Parent = holder,
+	})
+	local btnInc = U.button({
+		BackgroundColor3 = C.Surface, Size = UDim2.fromOffset(34, L.Hit), Text = "+",
+		TextColor3 = C.Text, Font = F.Bold, TextSize = L.TextSize, Parent = holder,
+	})
+	U.corner(btnInc, 6)
+
+	local ctl
+	local function render()
+		box.Text = tostring(ctl.Value) .. suffix
+	end
+	local function setter(v)
+		local n = snap(v)
+		ctl.Value = n
+		ui.Flags[ctl.Flag] = n
+		render()
+		return n
+	end
+
+	ctl = self:_register("Stepper", opts, row, snap(opts.Default or min), setter)
+	render()
+
+	local function change(delta)
+		ctl:Set(snap(ctl.Value + delta))
+	end
+	ctl:_conn(btnDec.Activated, function() change(-step) end)
+	ctl:_conn(btnInc.Activated, function() change(step) end)
+	ctl:_conn(box.FocusLost, function()
+		ctl:Set(tonumber(box.Text:gsub(suffix, "")) or ctl.Value)
+	end)
+
+	U.pressFx(btnDec, C.Surface)
+	U.pressFx(btnInc, C.Surface)
+
+	return self
+end
+
+Section.Stepper = Section_Stepper
+-- src/modules/TableView.lua  (F-060)
+-- Tabela com colunas, linhas e rolagem para dados estruturados.
+-- opts: { Name, Columns: {{Text, Width?}}, Rows: {{}}, RowHeight?, Description? }
+
+local function Section_TableView(self, opts)
+	local ui = self.UI
+	local columns = opts.Columns or {}
+	local rows = opts.Rows or {}
+	local rowHeight = opts.RowHeight or L.Row
+
+	local row = self:_row(L.Row + math.max(#rows, 1) * (rowHeight + 2) + 28, false)
+	local label = U.label({
+		Text = opts.Name, Position = UDim2.fromOffset(4, 0),
+		Size = UDim2.new(1, 0, 0, 22), Parent = row,
+	})
+	self:_hook(label, opts.Description)
+
+	local sc = U.scroller({
+		Position = UDim2.fromOffset(4, 26), Size = UDim2.new(1, -8, 0, math.min(#rows, 6) * (rowHeight + 2) + 4),
+		Parent = row,
+	})
+	U.pad(sc, 4, 4, 4 + L.ScrollBar, 4)
+	U.list(sc, 2)
+
+	local function render()
+		for _, c in ipairs(sc:GetChildren()) do
+			if c:IsA("Frame") or c:IsA("TextButton") then c:Destroy() end
+		end
+		local totalW = 0
+		for _, col in ipairs(columns) do totalW += (col.Width or 100) end
+		-- cabeçalho
+		local head = U.frame({
+			BackgroundColor3 = C.Header, Size = UDim2.new(1, 0, 0, rowHeight), Parent = sc,
+		})
+		U.corner(head, 6)
+		U.stroke(head, C.Stroke)
+		local cx = 0
+		for _, col in ipairs(columns) do
+			local cw = col.Width or 100
+			local h = U.label({
+				Text = col.Text, TextColor3 = C.SubText, TextSize = L.SmallSize,
+				Font = F.Bold, TextXAlignment = Enum.TextXAlignment.Left,
+				Position = UDim2.fromOffset(cx + 6, 0), Size = UDim2.fromOffset(cw - 12, rowHeight), Parent = head,
+			})
+			cx += cw
+		end
+		-- linhas
+		for _, r in ipairs(rows) do
+			local rw = U.button({
+				BackgroundColor3 = C.Surface, Size = UDim2.new(1, 0, 0, rowHeight), Parent = sc,
+			})
+			U.corner(rw, 6)
+			U.stroke(rw, C.Stroke)
+			cx = 0
+			for _, col in ipairs(columns) do
+				local cw = col.Width or 100
+				local val = tostring(r[col.Text] or r[i] or "")
+				local cell = U.label({
+					Text = val, TextColor3 = C.Text, TextSize = L.TextSize,
+					TextXAlignment = Enum.TextXAlignment.Left,
+					Position = UDim2.fromOffset(cx + 6, 0), Size = UDim2.fromOffset(cw - 12, rowHeight), Parent = rw,
+				})
+				cx += cw
+			end
+		end
+	end
+
+	render()
+	return self
+end
+
+Section.TableView = Section_TableView
+-- src/modules/XYPad.lua  (F-056)
+-- Pad 2D que emite dois valores (X, Y) por arrasto.
+-- opts: { Name, MinX, MaxX, MinY, MaxY, Default: {x, y}, Description?, Callback? }
+-- Valor: { x, y }
+
+local function Section_XYPad(self, opts)
+	local ui = self.UI
+	local minX, maxX = opts.MinX or 0, opts.MaxX or 100
+	local minY, maxY = opts.MinY or 0, opts.MaxY or 100
+	local default = opts.Default or { minX, minY }
+	local dx = math.clamp(tonumber(default[1]) or minX, minX, maxX)
+	local dy = math.clamp(tonumber(default[2]) or minY, minY, maxY)
+
+	local row = self:_row(L.Hit + 110, false)
+	local label = U.label({
+		Text = opts.Name, Position = UDim2.fromOffset(4, 0),
+		Size = UDim2.new(1, -118, 0, L.Hit), Parent = row,
+	})
+	self:_hook(label, opts.Description)
+
+	local pad = U.frame({
+		BackgroundColor3 = C.Background, AnchorPoint = Vector2.new(1, .5),
+		Position = UDim2.new(1, -4, .5, 0), Size = UDim2.fromOffset(110, L.Hit + 66), Parent = row,
+	})
+	U.corner(pad, 8)
+	U.stroke(pad, C.Stroke)
+
+	local cursor = U.frame({
+		BackgroundColor3 = C.Accent, AnchorPoint = Vector2.new(.5, .5),
+		Size = UDim2.fromOffset(14, 14), Parent = pad,
+	})
+	U.corner(cursor, 7)
+	U.stroke(cursor, C.White, 2)
+
+	local box = U.box({
+		BackgroundColor3 = C.Background, BackgroundTransparency = 0, Font = F.Medium,
+		TextXAlignment = Enum.TextXAlignment.Center, Position = UDim2.fromOffset(4, L.Hit + 10),
+		Size = UDim2.new(1, -8, 0, L.Hit - 4), Parent = row,
+	})
+	U.corner(box, 8)
+	U.stroke(box, C.Stroke)
+
+	local ctl
+	local function render()
+		local rx = maxX > minX and (ctl.Value[1] - minX) / (maxX - minX) or 0
+		local ry = maxY > minY and (ctl.Value[2] - minY) / (maxY - minY) or 0
+		cursor.Position = UDim2.fromScale(math.clamp(rx, 0, 1), math.clamp(ry, 0, 1))
+		box.Text = string.format("X: %.2f  Y: %.2f", ctl.Value[1], ctl.Value[2])
+	end
+	local function setter(v)
+		if typeof(v) ~= "table" or #v < 2 then return nil end
+		local x = math.clamp(tonumber(v[1]) or ctl.Value[1], minX, maxX)
+		local y = math.clamp(tonumber(v[2]) or ctl.Value[2], minY, maxY)
+		ctl.Value = { x, y }
+		ui.Flags[ctl.Flag] = { x, y }
+		render()
+		return { x, y }
+	end
+
+	ctl = self:_register("XYPad", opts, row, { dx, dy }, setter)
+	render()
+
+	local page = self.Tab.Page
+	local active = false
+	U.drag(pad, {
+		start = function(input)
+			active = true
+			page.ScrollingEnabled = false
+		end,
+		move = function(input)
+			if not active then return end
+			local p = U.pointer(input)
+			local ap, as = pad.AbsolutePosition, pad.AbsoluteSize
+			local rx = math.clamp((p.X - ap.X) / as.X, 0, 1)
+			local ry = math.clamp((p.Y - ap.Y) / as.Y, 0, 1)
+			local x = minX + (maxX - minX) * rx
+			local y = minY + (maxY - minY) * ry
+			ctl:Set({ x, y })
+		end,
+		stop = function()
+			active = false
+			page.ScrollingEnabled = true
+		end,
+	})
+
+	return self
+end
+
+Section.XYPad = Section_XYPad
+-- src/modules/hub/Aimbot.lua  (F-091)
+-- Depende do jogo alvo: getCamera, getCharacters, worldToScreen, raycast e o
+-- endereco/offset de entidade sao especificos de cada titulo.
+-- Flags: ui:Get("aimbot_*") / ui:Set("aimbot_*", v). Controles na aba "Aimbot".
+
+UI.HubModules.Aimbot = function(ui, win)
+	local RunService = game:GetService("RunService")
+	local Players = game:GetService("Players")
+	local UIS = game:GetService("UserInputService")
+	local localPlayer = Players.LocalPlayer
+
+	-- ============ GAME-SPECIFIC: preencha para o jogo alvo ============
+	local function getCamera() return workspace.CurrentCamera end
+	local function getCharacters()
+		local out = {}
+		for _, p in ipairs(Players:GetPlayers()) do
+			if p ~= localPlayer and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
+				local hum = p.Character:FindFirstChildOfClass("Humanoid")
+				table.insert(out, {
+					player = p, character = p.Character,
+					root = p.Character.HumanoidRootPart,
+					head = p.Character:FindFirstChild("Head"),
+					humanoid = hum,
+					team = p.Team,
+					health = hum and hum.Health or 0,
+					maxHealth = hum and hum.MaxHealth or 100,
+				})
+			end
+		end
+		return out
+	end
+	local function worldToScreen(point)
+		local cam = getCamera()
+		if not cam then return nil end
+		local vp, onScreen = cam:WorldToViewportPoint(point)
+		return Vector2.new(vp.X, vp.Y), onScreen, vp.Z
+	end
+	local function raycast(origin, direction, ignoreList)
+		local params = RaycastParams.new()
+		params.FilterDescendantsInstances = ignoreList or {}
+		params.FilterType = Enum.RaycastFilterType.Blacklist
+		return workspace:Raycast(origin, direction, params)
+	end
+	-- ===================================================================
+
+	local section = win:CreateTab("Aimbot", 10):CreateSection("Aimbot")
+	local cEnabled = section:Toggle({ Name = "Enabled", Default = false, Flag = "aimbot_enabled" })
+	local cKey = section:Keybind({ Name = "Hold Key", Default = Enum.KeyCode.MouseButton2, Flag = "aimbot_key" })
+	local cFOV = section:Slider({ Name = "FOV", Min = 10, Max = 500, Default = 120, Flag = "aimbot_fov" })
+	local cSmooth = section:Slider({ Name = "Smoothing", Min = 1, Max = 30, Default = 6, Flag = "aimbot_smooth" })
+	local cBone = section:Dropdown({ Name = "Bone", Options = { "Head", "UpperTorso", "HumanoidRootPart" }, Default = "Head", Flag = "aimbot_bone" })
+	local cTeam = section:Toggle({ Name = "Team Check", Default = true, Flag = "aimbot_team" })
+	local cVis = section:Toggle({ Name = "Visibility Check", Default = true, Flag = "aimbot_vis" })
+	local cMaxDist = section:Slider({ Name = "Max Distance", Min = 50, Max = 2000, Default = 1000, Flag = "aimbot_maxdist" })
+
+	local function isKeyDown(value)
+		if value == "None" then return true end
+		local kc = Enum.KeyCode[value]
+		if kc then return UIS:IsKeyDown(kc) end
+		local mb = Enum.UserInputType[value]
+		if mb then return UIS:IsMouseButtonPressed(mb) end
+		return false
+	end
+
+	local function bonePart(ch)
+		local b = ui:Get("aimbot_bone")
+		if b == "Head" then return ch.head end
+		if b == "UpperTorso" then return ch.character:FindFirstChild("UpperTorso") end
+		return ch.root
+	end
+
+	local function getTarget()
+		local cam = getCamera()
+		if not cam then return nil end
+		local origin = cam.CFrame.Position
+		local fov = ui:Get("aimbot_fov")
+		local maxDist = ui:Get("aimbot_maxdist")
+		local best, bestScore = nil, fov
+		for _, ch in ipairs(getCharacters()) do
+			if ui:Get("aimbot_team") and ch.team == localPlayer.Team then continue end
+			if (ch.root.Position - origin).Magnitude > maxDist then continue end
+			if ui:Get("aimbot_vis") then
+				local r = raycast(origin, ch.root.Position - origin, { localPlayer.Character, ch.character })
+				if r and r.Instance and not ch.character:IsAncestorOf(r.Instance) then continue end
+			end
+			local part = bonePart(ch)
+			if not part then continue end
+			local pos2d, onScreen, depth = worldToScreen(part.Position)
+			if not onScreen or depth <= 0 then continue end
+			local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+			local dist = (pos2d - center).Magnitude
+			if dist < bestScore then
+				bestScore = dist
+				best = { character = ch, part = part, pos = part.Position }
+			end
+		end
+		return best
+	end
+
+	local conn = RunService.RenderStepped:Connect(function()
+		if not ui:Get("aimbot_enabled") then return end
+		if not isKeyDown(ui:Get("aimbot_key")) then return end
+		local target = getTarget()
+		if not target then return end
+		local cam = getCamera()
+		local smooth = math.max(1, ui:Get("aimbot_smooth"))
+		local current = cam.CFrame.Position
+		local desired = CFrame.lookAt(current, target.pos)
+		-- interpolacao linear simplificada da posicao da camera (suavizacao)
+		cam.CFrame = CFrame.new(current:Lerp(desired.Position, 1 / smooth)) * (cam.CFrame - cam.CFrame.Position)
+	end)
+
+	return { stop = function() if conn then conn:Disconnect() end end }
+end
+-- src/modules/hub/SilentAim.lua  (F-092)
+-- Depende do jogo alvo: getCamera, getCharacters, worldToScreen e o hook de
+-- disparo (arquivo de arma / angulo de mira) sao especificos de cada titulo.
+-- Nao move a camera visivelmente; so sobrescreve o angulo de tiro no fire.
+-- Flags: ui:Get("silentaim_*") / ui:Set("silentaim_*", v). Controles na aba "Silent Aim".
+
+UI.HubModules.SilentAim = function(ui, win)
+	local Players = game:GetService("Players")
+	local localPlayer = Players.LocalPlayer
+
+	-- ============ GAME-SPECIFIC: preencha para o jogo alvo ============
+	local function getCamera() return workspace.CurrentCamera end
+	local function getCharacters()
+		local out = {}
+		for _, p in ipairs(Players:GetPlayers()) do
+			if p ~= localPlayer and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
+				table.insert(out, {
+					player = p, character = p.Character,
+					root = p.Character.HumanoidRootPart,
+					head = p.Character:FindFirstChild("Head"),
+					team = p.Team,
+				})
+			end
+		end
+		return out
+	end
+	local function worldToScreen(point)
+		local cam = getCamera()
+		if not cam then return nil end
+		local vp, onScreen = cam:WorldToViewportPoint(point)
+		return Vector2.new(vp.X, vp.Y), onScreen, vp.Z
+	end
+	-- FILL: funcao que retorna o angulo/direcao atual da arma e permite sobrepor no fire
+	local function getAimDirection() return getCamera().CFrame.LookVector end
+	local function setAimDirection(dir) -- chamado no frame do disparo
+		-- game-specific: gravar no offset de angulo de tiro da arma
+	end
+	-- =================================================================
+
+	local section = win:CreateTab("Silent Aim", 11):CreateSection("Silent Aim")
+	local cEnabled = section:Toggle({ Name = "Enabled", Default = false, Flag = "silentaim_enabled" })
+	local cFOV = section:Slider({ Name = "FOV", Min = 10, Max = 500, Default = 120, Flag = "silentaim_fov" })
+	local cHitChance = section:Slider({ Name = "Hit Chance (%)", Min = 0, Max = 100, Default = 100, Flag = "silentaim_hitchance" })
+	local cBone = section:Dropdown({ Name = "Bone", Options = { "Head", "UpperTorso", "HumanoidRootPart" }, Default = "Head", Flag = "silentaim_bone" })
+	local cTeam = section:Toggle({ Name = "Team Check", Default = true, Flag = "silentaim_team" })
+
+	local function bonePart(ch)
+		local b = ui:Get("silentaim_bone")
+		if b == "Head" then return ch.head end
+		if b == "UpperTorso" then return ch.character:FindFirstChild("UpperTorso") end
+		return ch.root
+	end
+
+	local function getTarget()
+		local cam = getCamera()
+		if not cam then return nil end
+		local origin = cam.CFrame.Position
+		local fov = ui:Get("silentaim_fov")
+		local best, bestScore = nil, fov
+		for _, ch in ipairs(getCharacters()) do
+			if ui:Get("silentaim_team") and ch.team == localPlayer.Team then continue end
+			local part = bonePart(ch)
+			if not part then continue end
+			local pos2d, onScreen, depth = worldToScreen(part.Position)
+			if not onScreen or depth <= 0 then continue end
+			local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+			local dist = (pos2d - center).Magnitude
+			if dist < bestScore then
+				bestScore = dist
+				best = { pos = part.Position }
+			end
+		end
+		return best
+	end
+
+	-- FILL: conectar ao evento de disparo da arma; ao atirar, sobrepor direcao com setAimDirection(direcaoPara(target.pos))
+	-- Exemplo de esqueleto (nao funciona sem o offset do jogo):
+	-- local mouse = localPlayer:GetMouse()
+	-- mouse.Button1Down:Connect(function()
+	--     if not ui:Get("silentaim_enabled") then return end
+	--     if math.random() * 100 > ui:Get("silentaim_hitchance") then return end
+	--     local t = getTarget()
+	--     if t then setAimDirection((t.pos - getCamera().CFrame.Position).Unit) end
+	-- end)
+
+	return { stop = function() end }
+end
+-- src/modules/hub/Triggerbot.lua  (F-093)
+-- Depende do jogo alvo: raio da camera ate o ponto sob a mira (mouse hit) e
+-- deteccao de entidade sob o reticulo sao especificos de cada titulo.
+-- Dispara automaticamente quando a mira esta sobre um alvo valido.
+-- Flags: ui:Get("triggerbot_*") / ui:Set("triggerbot_*", v). Controles na aba "Triggerbot".
+
+UI.HubModules.Triggerbot = function(ui, win)
+	local Players = game:GetService("Players")
+	local UIS = game:GetService("UserInputService")
+	local RunService = game:GetService("RunService")
+	local localPlayer = Players.LocalPlayer
+	local mouse = localPlayer:GetMouse()
+
+	-- ============ GAME-SPECIFIC: preencha para o jogo alvo ============
+	local function getCamera() return workspace.CurrentCamera end
+	-- FILL: retorna a instancia/entidade sob o ponto da tela do mouse (reticulo)
+	local function getMouseTarget()
+		-- game-specific: raycast da camera na direcao do mouse / mouse.Hit
+		return mouse.Target
+	end
+	local function getCharacterOfTarget(target)
+		if not target then return nil end
+		local char = target:FindFirstAncestorOfClass("Model")
+		if char and char:FindFirstChild("Humanoid") then return { character = char, player = Players:GetPlayerFromCharacter(char) } end
+		return nil
+	end
+	-- =================================================================
+
+	local section = win:CreateTab("Triggerbot", 12):CreateSection("Triggerbot")
+	local cEnabled = section:Toggle({ Name = "Enabled", Default = false, Flag = "triggerbot_enabled" })
+	local cMode = section:Dropdown({ Name = "Mode", Options = { "Always", "Hold Key" }, Default = "Always", Flag = "triggerbot_mode" })
+	local cKey = section:Keybind({ Name = "Hold Key", Default = Enum.KeyCode.MouseButton2, Flag = "triggerbot_key" })
+	local cDelay = section:Slider({ Name = "Delay (ms)", Min = 0, Max = 500, Default = 50, Flag = "triggerbot_delay" })
+	local cTeam = section:Toggle({ Name = "Team Check", Default = true, Flag = "triggerbot_team" })
+
+	local function isKeyDown(value)
+		if value == "None" then return true end
+		local kc = Enum.KeyCode[value]
+		if kc then return UIS:IsKeyDown(kc) end
+		local mb = Enum.UserInputType[value]
+		if mb then return UIS:IsMouseButtonPressed(mb) end
+		return false
+	end
+
+	local conn
+	conn = RunService and game:GetService("RunService").Heartbeat:Connect(function()
+		if not ui:Get("triggerbot_enabled") then return end
+		local mode = ui:Get("triggerbot_mode")
+		if mode == "Hold Key" and not isKeyDown(ui:Get("triggerbot_key")) then return end
+
+		local target = getMouseTarget()
+		local ch = getCharacterOfTarget(target)
+		if not ch then return end
+		if ui:Get("triggerbot_team") and ch.player and ch.player.Team == localPlayer.Team then return end
+
+		local delayMs = ui:Get("triggerbot_delay")
+		if delayMs > 0 then
+			task.delay(delayMs / 1000, function()
+				-- FILL: acionar disparo (fire weapon) -- jogo especifico
+				pcall(function() if mouse1click then mouse1click() end end)
+			end)
+		else
+			-- FILL: acionar disparo imediatamente -- jogo especifico
+			pcall(function() if mouse1click then mouse1click() end end)
+		end
+	end)
+
+	return { stop = function() if conn then conn:Disconnect() end end }
+end
+-- src/modules/hub/ESP.lua  (F-094, F-095, F-096)
+-- Depende do jogo alvo: getCamera, getCharacters, worldToScreen e equipe/saude
+-- sao especificos de cada titulo.
+-- Desenha box, esqueleto, vida, nome, distancia, chams e tracers sobre entidades.
+-- Flags: ui:Get("esp_*") / ui:Set("esp_*", v). Controles na aba "ESP".
+
+UI.HubModules.ESP = function(ui, win)
+	local Players = game:GetService("Players")
+	local RunService = game:GetService("RunService")
+	local localPlayer = Players.LocalPlayer
+
+	local drawings = {} -- [player] = { Drawing[] }
+	local charEsp = {}  -- [character] = { Box, Tracer, Name, Health, Distance, Skeleton: {line} }
+
+	-- ============ GAME-SPECIFIC: preencha para o jogo alvo ============
+	local function getCamera() return workspace.CurrentCamera end
+	local function getCharacters()
+		local out = {}
+		for _, p in ipairs(Players:GetPlayers()) do
+			if p ~= localPlayer and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
+				local hum = p.Character:FindFirstChildOfClass("Humanoid")
+				table.insert(out, {
+					player = p, character = p.Character,
+					root = p.Character.HumanoidRootPart,
+					head = p.Character:FindFirstChild("Head"),
+					humanoid = hum,
+					team = p.Team,
+					health = hum and hum.Health or 0,
+					maxHealth = hum and hum.MaxHealth or 100,
+				})
+			end
+		end
+		return out
+	end
+	local function worldToScreen(point)
+		local cam = getCamera()
+		if not cam then return nil end
+		local vp, onScreen = cam:WorldToViewportPoint(point)
+		return Vector2.new(vp.X, vp.Y), onScreen, vp.Z
+	end
+	-- =================================================================
+
+	local section = win:CreateTab("ESP", 20):CreateSection("ESP")
+	local cEnabled = section:Toggle({ Name = "Enabled", Default = false, Flag = "esp_enabled" })
+	local cTeam = section:Toggle({ Name = "Team Check", Default = true, Flag = "esp_team" })
+	local cMaxDist = section:Slider({ Name = "Max Distance", Min = 50, Max = 3000, Default = 1000, Flag = "esp_maxdist" })
+	local cBox = section:Toggle({ Name = "Box", Default = true, Flag = "esp_box" })
+	local cSkeleton = section:Toggle({ Name = "Skeleton", Default = false, Flag = "esp_skeleton" })
+	local cHealth = section:Toggle({ Name = "Health", Default = true, Flag = "esp_health" })
+	local cName = section:Toggle({ Name = "Name", Default = true, Flag = "esp_name" })
+	local cDistance = section:Toggle({ Name = "Distance", Default = true, Flag = "esp_distance" })
+	local cChams = section:Toggle({ Name = "Chams", Default = false, Flag = "esp_chams" })
+	local cTracers = section:Toggle({ Name = "Tracers", Default = false, Flag = "esp_tracers" })
+
+	local function colorFor(kind)
+		local c = ui:Get("esp_color_" .. kind)
+		return c or Color3.fromRGB(255, 255, 255)
+	end
+
+	local function createDrawing(kind)
+		local ok, d = pcall(function() return Drawing.new(kind) end)
+		if ok and d then return d end
+		return nil
+	end
+
+	local function newEspEntry()
+		local e = {}
+		e.box = createDrawing("Square")
+		if e.box then e.box.Thickness = 1; e.box.Filled = false end
+		e.tracer = createDrawing("Line")
+		if e.tracer then e.tracer.Thickness = 1 end
+		e.name = createDrawing("Text")
+		if e.name then e.name.Size = 14; e.name.Center = true; e.name.Outline = true end
+		e.health = createDrawing("Text")
+		if e.health then e.health.Size = 14; e.health.Center = false; e.health.Outline = true end
+		e.distance = createDrawing("Text")
+		if e.distance then e.distance.Size = 14; e.distance.Center = true; e.distance.Outline = true end
+		e.skeleton = {}
+		for _, name in ipairs({ "HeadNeck", "NeckTorso", "TorsoLShoulder", "TorsoRShoulder", "TorsoLHip", "TorsoRHip", "LShoulderLHand", "RShoulderRHand", "LHipLFoot", "RHipRFoot" }) do
+			local l = createDrawing("Line")
+			if l then l.Thickness = 1 end
+			e.skeleton[name] = l
+		end
+		-- chams: aplicado via Highlight ou adorno no modelo (game-specific)
+		e.chamsAdorn = nil
+		return e
+	end
+
+	local function hideEntry(e)
+		if e.box then e.box.Visible = false end
+		if e.tracer then e.tracer.Visible = false end
+		if e.name then e.name.Visible = false end
+		if e.health then e.health.Visible = false end
+		if e.distance then e.distance.Visible = false end
+		for _, l in pairs(e.skeleton) do if l then l.Visible = false end end
+		if e.chamsAdorn then
+			pcall(function() e.chamsAdorn:Destroy() end)
+			e.chamsAdorn = nil
+		end
+	end
+
+	local conn = RunService.RenderStepped:Connect(function()
+		if not ui:Get("esp_enabled") then
+			for _, e in pairs(charEsp) do hideEntry(e) end
+			return
+		end
+
+		local cam = getCamera()
+		local center = cam and Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2) or Vector2.zero
+		local seen = {}
+
+		for _, ch in ipairs(getCharacters()) do
+			if ui:Get("esp_team") and ch.team == localPlayer.Team then continue end
+			local dist = (ch.root.Position - cam.CFrame.Position).Magnitude
+			if dist > ui:Get("esp_maxdist") then continue end
+			seen[ch.player] = true
+
+			local e = charEsp[ch.player]
+			if not e then
+				e = newEspEntry()
+				charEsp[ch.player] = e
+			end
+
+			local headPos = (ch.head and ch.head.Position) or ch.root.Position
+			local rootPos = ch.root.Position
+			local top2d, topVis, topDepth = worldToScreen(headPos + Vector3.new(0, 0.5, 0))
+			local bottom2d, botVis, botDepth = worldToScreen(rootPos - Vector3.new(0, 3, 0))
+
+			if topVis and botVis and topDepth > 0 and botDepth > 0 then
+				local height = math.abs(bottom2d.Y - top2d.Y)
+				local width = height * 0.5
+				local left = top2d.X - width / 2
+				local top = top2d.Y
+
+				if ui:Get("esp_box") and e.box then
+					e.box.Visible = true
+					e.box.Position = Vector2.new(left, top)
+					e.box.Size = Vector2.new(width, height)
+					e.box.Color = colorFor("box")
+				else
+					if e.box then e.box.Visible = false end
+				end
+
+				if ui:Get("esp_tracers") and e.tracer and center then
+					e.tracer.Visible = true
+					e.tracer.From = center
+					e.tracer.To = bottom2d
+					e.tracer.Color = colorFor("tracer")
+				else
+					if e.tracer then e.tracer.Visible = false end
+				end
+
+				if ui:Get("esp_name") and e.name then
+					e.name.Visible = true
+					e.name.Text = ch.player.Name
+					e.name.Position = Vector2.new(top2d.X, top2d.Y - height - 18)
+					e.name.Color = colorFor("name")
+				else
+					if e.name then e.name.Visible = false end
+				end
+
+				if ui:Get("esp_health") and e.health and ch.humanoid then
+					e.health.Visible = true
+					e.health.Text = string.format("%d/%d", math.floor(ch.health), math.floor(ch.maxHealth))
+					e.health.Position = Vector2.new(left - 30, top + height / 2)
+					local hPct = ch.health / ch.maxHealth
+					e.health.Color = Color3.fromRGB(255 * (1 - hPct), 255 * hPct, 0)
+				else
+					if e.health then e.health.Visible = false end
+				end
+
+				if ui:Get("esp_distance") and e.distance then
+					e.distance.Visible = true
+					e.distance.Text = string.format("%dm", math.floor(dist))
+					e.distance.Position = Vector2.new(top2d.X, bottom2d.Y + 2)
+					e.distance.Color = colorFor("distance")
+				else
+					if e.distance then e.distance.Visible = false end
+				end
+
+				if ui:Get("esp_skeleton") then
+					-- FILL: ligar partes do esqueleto entre si (posicoes game-specific)
+					for _, l in pairs(e.skeleton) do if l then l.Visible = false end end
+				else
+					for _, l in pairs(e.skeleton) do if l then l.Visible = false end end
+				end
+
+				if ui:Get("esp_chams") then
+					-- FILL: aplicar Highlight/adorno ao modelo (game-specific, sem assets obrigatorios)
+				else
+					if e.chamsAdorn then pcall(function() e.chamsAdorn:Destroy() end); e.chamsAdorn = nil end
+				end
+			else
+				hideEntry(e)
+			end
+		end
+
+		-- limpa entradas de jogadores que sairam
+		for player, e in pairs(charEsp) do
+			if not seen[player] then
+				hideEntry(e)
+				charEsp[player] = nil
+			end
+		end
+	end)
+
+	return { stop = function()
+		if conn then conn:Disconnect() end
+		for _, e in pairs(charEsp) do hideEntry(e) end
+		charEsp = {}
+	end }
+end
+-- src/modules/hub/Radar.lua  (F-097)
+-- Depende do jogo alvo: getCamera, getCharacters e posicoes relativas sao
+-- especificos de cada titulo.
+-- Minimapa com pontos de jogadores relativos ao local player.
+-- Flags: ui:Get("radar_*") / ui:Set("radar_*", v). Controles na aba "Radar".
+
+UI.HubModules.Radar = function(ui, win)
+	local Players = game:GetService("Players")
+	local RunService = game:GetService("RunService")
+	local localPlayer = Players.LocalPlayer
+
+	local radarDrawing = nil
+
+	-- ============ GAME-SPECIFIC: preencha para o jogo alvo ============
+	local function getCamera() return workspace.CurrentCamera end
+	local function getLocalRoot()
+		if localPlayer.Character then return localPlayer.Character:FindFirstChild("HumanoidRootPart") end
+		return nil
+	end
+	local function getCharacters()
+		local out = {}
+		for _, p in ipairs(Players:GetPlayers()) do
+			if p ~= localPlayer and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
+				table.insert(out, { player = p, root = p.Character.HumanoidRootPart, team = p.Team })
+			end
+		end
+		return out
+	end
+	local function worldToScreen(point)
+		local cam = getCamera()
+		if not cam then return nil end
+		local vp, onScreen = cam:WorldToViewportPoint(point)
+		return Vector2.new(vp.X, vp.Y), onScreen, vp.Z
+	end
+	-- =================================================================
+
+	local section = win:CreateTab("Radar", 30):CreateSection("Radar")
+	local cEnabled = section:Toggle({ Name = "Enabled", Default = false, Flag = "radar_enabled" })
+	local cRange = section:Slider({ Name = "Range (studs)", Min = 100, Max = 3000, Default = 500, Flag = "radar_range" })
+	local cSize = section:Slider({ Name = "Size (px)", Min = 100, Max = 400, Default = 200, Flag = "radar_size" })
+	local cTeam = section:Toggle({ Name = "Team Check", Default = true, Flag = "radar_team" })
+
+	local function createRadar()
+		if radarDrawing then return end
+		local size = ui:Get("radar_size")
+		local d = Drawing.new("Square")
+		d.Size = Vector2.new(size, size)
+		d.Position = Vector2.new(20, 20)
+		d.Color = Color3.fromRGB(40, 40, 40)
+		d.Filled = true
+		d.Transparency = 0.6
+		d.Visible = true
+		-- borda
+		local border = Drawing.new("Square")
+		border.Size = Vector2.new(size + 4, size + 4)
+		border.Position = Vector2.new(18, 18)
+		border.Color = Color3.fromRGB(255, 255, 255)
+		border.Filled = false
+		border.Thickness = 2
+		border.Visible = true
+		radarDrawing = { main = d, border = border, dots = {} }
+	end
+
+	local function destroyRadar()
+		if radarDrawing then
+			pcall(function() radarDrawing.main:Remove() end)
+			pcall(function() radarDrawing.border:Remove() end)
+			for _, dot in ipairs(radarDrawing.dots) do pcall(function() dot:Remove() end) end
+			radarDrawing = nil
+		end
+	end
+
+	local conn = RunService.RenderStepped:Connect(function()
+		if not ui:Get("radar_enabled") then
+			destroyRadar()
+			return
+		end
+		createRadar()
+		local size = ui:Get("radar_size")
+		local range = ui:Get("radar_range")
+		local r = radarDrawing
+		r.main.Size = Vector2.new(size, size)
+		r.main.Position = Vector2.new(20, 20)
+		r.border.Size = Vector2.new(size + 4, size + 4)
+		r.border.Position = Vector2.new(18, 18)
+
+		local localRoot = getLocalRoot()
+		local cam = getCamera()
+		local camCF = cam and cam.CFrame or CFrame.new()
+
+		-- recria dots conforme necessario
+		local chars = getCharacters()
+		while #r.dots < #chars do
+			local dot = Drawing.new("Square")
+			dot.Size = Vector2.new(5, 5)
+			dot.Filled = true
+			table.insert(r.dots, dot)
+		end
+		while #r.dots > #chars do
+			local dot = table.remove(r.dots)
+			pcall(function() dot:Remove() end)
+		end
+
+		local i = 0
+		for _, ch in ipairs(chars) do
+			i += 1
+			local dot = r.dots[i]
+			if ui:Get("radar_team") and ch.team == localPlayer.Team then
+				dot.Visible = false
+				continue
+			end
+			local localPos = localRoot and localRoot.Position or camCF.Position
+			local rel = ch.root.Position - localPos
+			if rel.Magnitude > range then
+				dot.Visible = false
+				continue
+			end
+			-- projeta posicao relativa no plano do radar (usando LookVector da camera)
+			local look = camCF.LookVector
+			local right = camCF.RightVector
+			local x = rel:Dot(right)
+			local y = rel:Dot(look)
+			local scale = size / (range * 2)
+			local dx = x * scale
+			local dy = y * scale
+			dot.Visible = true
+			dot.Position = Vector2.new(20 + size / 2 + dx - 2.5, 20 + size / 2 - dy - 2.5)
+			dot.Color = ch.team == localPlayer.Team and Color3.fromRGB(0, 255, 0) or Color3.fromRGB(255, 50, 50)
+		end
+	end)
+
+	return { stop = function()
+		if conn then conn:Disconnect() end
+		destroyRadar()
+	end }
+end
+-- src/modules/hub/Crosshair.lua  (F-098)
+-- Mira personalizada desenhada no centro da tela. Nao depende de offset de
+-- jogo (usa ViewportSize), mas o ponto central e o da camera do titulo.
+-- Flags: ui:Get("crosshair_*") / ui:Set("crosshair_*", v). Controles na aba "Crosshair".
+
+UI.HubModules.Crosshair = function(ui, win)
+	local RunService = game:GetService("RunService")
+	local Players = game:GetService("Players")
+	local localPlayer = Players.LocalPlayer
+
+	local drawings = {}
+
+	-- ============ GAME-SPECIFIC: centro da tela da camera do titulo ============
+	local function getCamera() return workspace.CurrentCamera end
+	local function screenCenter()
+		local cam = getCamera()
+		if not cam then return Vector2.new(0, 0) end
+		return Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+	end
+	-- ===========================================================================
+
+	local section = win:CreateTab("Crosshair", 40):CreateSection("Crosshair")
+	local cEnabled = section:Toggle({ Name = "Enabled", Default = false, Flag = "crosshair_enabled" })
+	local cStyle = section:Dropdown({ Name = "Style", Options = { "Cross", "Dot", "Cross + Dot" }, Default = "Cross", Flag = "crosshair_style" })
+	local cSize = section:Slider({ Name = "Size", Min = 2, Max = 30, Default = 8, Flag = "crosshair_size" })
+	local cThickness = section:Slider({ Name = "Thickness", Min = 1, Max = 6, Default = 1, Flag = "crosshair_thickness" })
+	local cGap = section:Slider({ Name = "Gap", Min = 0, Max = 20, Default = 4, Flag = "crosshair_gap" })
+	local cColor = section:ColorPicker({ Name = "Color", Default = Color3.fromRGB(255, 255, 255), Flag = "crosshair_color" })
+
+	local function newLine()
+		local ok, d = pcall(function() return Drawing.new("Line") end)
+		if ok and d then
+			d.Thickness = 1
+			d.Visible = false
+		end
+		return d
+	end
+	local function newDot()
+		local ok, d = pcall(function() return Drawing.new("Circle") end)
+		if ok and d then
+			d.Filled = true
+			d.Visible = false
+		end
+		return d
+	end
+
+	local conn = RunService.RenderStepped:Connect(function()
+		local enabled = ui:Get("crosshair_enabled")
+		local style = ui:Get("crosshair_style")
+		local size = ui:Get("crosshair_size")
+		local thick = ui:Get("crosshair_thickness")
+		local gap = ui:Get("crosshair_gap")
+		local color = ui:Get("crosshair_color") or Color3.fromRGB(255, 255, 255)
+		local center = screenCenter()
+
+		if not enabled then
+			for _, d in ipairs(drawings) do d.Visible = false end
+			return
+		end
+
+		-- garante linhas suficientes
+		while #drawings < 4 do table.insert(drawings, newLine()) end
+		while #drawings > 4 do
+			local d = table.remove(drawings)
+			pcall(function() d:Remove() end)
+		end
+
+		local l1, l2, l3, l4 = drawings[1], drawings[2], drawings[3], drawings[4]
+		local half = size / 2
+		local inner = gap
+		local outer = gap + half
+
+		local function apply(l, from, to)
+			l.Visible = true
+			l.From = from
+			l.To = to
+			l.Color = color
+			l.Thickness = thick
+		end
+
+		if style == "Cross" or style == "Cross + Dot" then
+			apply(l1, center + Vector2.new(0, inner), center + Vector2.new(0, outer))       -- cima
+			apply(l2, center + Vector2.new(0, -inner), center + Vector2.new(0, -outer))     -- baixo
+			apply(l3, center + Vector2.new(inner, 0), center + Vector2.new(outer, 0))       -- direita
+			apply(l4, center + Vector2.new(-inner, 0), center + Vector2.new(-outer, 0))     -- esquerda
+		else
+			for _, l in ipairs(drawings) do l.Visible = false end
+		end
+
+		-- ponto central
+		if not drawings.dot then drawings.dot = newDot() end
+		if style == "Dot" or style == "Cross + Dot" then
+			drawings.dot.Visible = true
+			drawings.dot.Radius = math.max(2, thick)
+			drawings.dot.Position = center - Vector2.new(thick / 2, thick / 2)
+			drawings.dot.Color = color
+		else
+			drawings.dot.Visible = false
+		end
+	end)
+
+	return { stop = function()
+		if conn then conn:Disconnect() end
+		for _, d in ipairs(drawings) do pcall(function() d:Remove() end) end
+		if drawings.dot then pcall(function() drawings.dot:Remove() end) end
+		drawings = {}
+	end }
+end
+-- src/modules/hub/Movement.lua  (F-099)
+-- Depende do jogo alvo: Humanoid, WalkSpeed, Jump e CFrame do personagem sao
+-- especificos de cada titulo.
+-- Bhop (pulo automatico), Speed (multiplicador de velocidade) e Fly.
+-- Flags: ui:Get("mov_*") / ui:Set("mov_*", v). Controles na aba "Movement".
+
+UI.HubModules.Movement = function(ui, win)
+	local RunService = game:GetService("RunService")
+	local Players = game:GetService("Players")
+	local UIS = game:GetService("UserInputService")
+	local localPlayer = Players.LocalPlayer
+
+	local flyConn = nil
+	local flyVelocity = nil
+
+	-- ============ GAME-SPECIFIC: preencha para o jogo alvo ============
+	local function getHumanoid()
+		if localPlayer.Character then
+			return localPlayer.Character:FindFirstChildOfClass("Humanoid")
+		end
+		return nil
+	end
+	local function getRoot()
+		if localPlayer.Character then
+			return localPlayer.Character:FindFirstChild("HumanoidRootPart")
+		end
+		return nil
+	end
+	local function setWalkSpeed(hum, v)
+		if hum then
+			-- FILL: alguns jogos travam WalkSpeed; usar SetState ou speed offset se necessario
+			pcall(function() hum.WalkSpeed = v end)
+		end
+	end
+	local function setJumpPower(hum, v)
+		if hum then pcall(function() hum.JumpPower = v end) end
+	end
+	local function requestJump()
+		local hum = getHumanoid()
+		if hum then pcall(function() hum.Jump = true end) end
+	end
+	-- =================================================================
+
+	local section = win:CreateTab("Movement", 50):CreateSection("Movement")
+	local cBhop = section:Toggle({ Name = "Bhop (pulo auto)", Default = false, Flag = "mov_bhop" })
+	local cSpeed = section:Toggle({ Name = "Speed", Default = false, Flag = "mov_speed" })
+	local cSpeedMult = section:Slider({ Name = "Speed Multiplier", Min = 1, Max = 10, Default = 2, Flag = "mov_speedmult" })
+	local cFly = section:Toggle({ Name = "Fly", Default = false, Flag = "mov_fly" })
+	local cFlySpeed = section:Slider({ Name = "Fly Speed", Min = 10, Max = 200, Default = 60, Flag = "mov_flyspeed" })
+
+	-- Bhop: pula automaticamente quando toca o chao
+	local bhopConn = RunService.Heartbeat:Connect(function()
+		if not ui:Get("mov_bhop") then return end
+		local hum = getHumanoid()
+		if not hum then return end
+		-- FILL: detectar estado de chão (FloorMaterial / Humanoid.FloorMaterial ~= nil)
+		local onGround = (hum.FloorMaterial ~= nil and hum.FloorMaterial ~= Enum.Material.Air)
+		if onGround then requestJump() end
+	end)
+
+	-- Speed
+	local speedConn = RunService.Heartbeat:Connect(function()
+		if not ui:Get("mov_speed") then return end
+		local hum = getHumanoid()
+		if not hum then return end
+		local base = 16 -- walkspeed base padrao do Roblox; FILL: ler do jogo alvo
+		setWalkSpeed(hum, base * ui:Get("mov_speedmult"))
+	end)
+
+	-- Fly: CFrame baseado na camera, teclas WASD
+	local function startFly()
+		if flyConn then return end
+		flyConn = RunService.RenderStepped:Connect(function()
+			if not ui:Get("mov_fly") then
+				stopFly()
+				return
+			end
+			local root = getRoot()
+			local cam = game:GetService("Workspace").CurrentCamera
+			if not root or not cam then return end
+			local speed = ui:Get("mov_flyspeed")
+			local dir = Vector3.zero
+			if UIS:IsKeyDown(Enum.KeyCode.W) then dir += cam.CFrame.LookVector end
+			if UIS:IsKeyDown(Enum.KeyCode.S) then dir -= cam.CFrame.LookVector end
+			if UIS:IsKeyDown(Enum.KeyCode.A) then dir -= cam.CFrame.RightVector end
+			if UIS:IsKeyDown(Enum.KeyCode.D) then dir += cam.CFrame.RightVector end
+			if dir.Magnitude > 0 then dir = dir.Unit end
+			local move = dir * (speed / 60) -- passo por frame aproximado
+			root.CFrame = root.CFrame + move
+			-- FILL: anular velocidade fisica (root.AssemblyLinearVelocity = Vector3.zero) se necessario
+		end)
+	end
+	local function stopFly()
+		if flyConn then flyConn:Disconnect(); flyConn = nil end
+	end
+
+	local flyToggle = ui.Controls["mov_fly"]
+	if flyToggle then
+		flyToggle:_conn(flyToggle:Get and function() end, function() end) -- placeholder; abaixo usa o valor diretamente
+	end
+	-- Liga/desliga fly com base no valor do toggle (verificado no loop acima via stopFly)
+
+	return { stop = function()
+		bhopConn:Disconnect()
+		speedConn:Disconnect()
+		stopFly()
+	end }
+end
+-- src/modules/hub/Navigation.lua  (F-100, parte 1)
+-- Depende do jogo alvo: HumanoidRootPart.CFrame e teleporte sao especificos
+-- de cada titulo.
+-- Waypoints (adicionar, listar, teleportar), teleport para jogador.
+-- Flags: ui:Get("nav_*") / ui:Set("nav_*", v). Controles na aba "Navigation".
+
+UI.HubModules.Navigation = function(ui, win)
+	local Players = game:GetService("Players")
+	local localPlayer = Players.LocalPlayer
+
+	local waypoints = {} -- { {name, position} }
+
+	-- ============ GAME-SPECIFIC: preencha para o jogo alvo ============
+	local function getRoot()
+		if localPlayer.Character then
+			return localPlayer.Character:FindFirstChild("HumanoidRootPart")
+		end
+		return nil
+	end
+	local function teleportTo(position)
+		local root = getRoot()
+		if not root then return false end
+		-- FILL: aplicar CFrame ao root (algunos jogos exigem desativar colisoes/anchored)
+		pcall(function() root.CFrame = CFrame.new(position) end)
+		return true
+	end
+	local function getPlayerRoot(player)
+		if player.Character then return player.Character:FindFirstChild("HumanoidRootPart") end
+		return nil
+	end
+	-- =================================================================
+
+	local section = win:CreateTab("Navigation", 60):CreateSection("Navigation")
+	local cWaypointName = section:TextBox({ Name = "Nome do Waypoint", Placeholder = "ex: Base", Flag = "nav_wpname" })
+	local cAddWP = section:Button({ Name = "Adicionar Waypoint (aqui)", Flag = "nav_addwp" })
+	local cTpPlayer = section:TextBox({ Name = "Teleport p/ Jogador", Placeholder = "nome do jogador", Flag = "nav_tpplayer" })
+	local cTpBtn = section:Button({ Name = "Teleportar", Flag = "nav_tpbtn" })
+	local cList = section:Label("Waypoints: (nenhum)")
+
+	local ctlList = ui.Controls["nav_wpname"] -- nao usado, apenas referencia
+
+	local addCtrl, tpBtnCtrl = nil, nil
+	for flag, ctl in pairs(ui.Controls) do
+		if flag == "nav_addwp" then addCtrl = ctl end
+		if flag == "nav_tpbtn" then tpBtnCtrl = ctl end
+	end
+
+	local function refreshList()
+		local txt = "Waypoints: " .. #waypoints
+		for _, wp in ipairs(waypoints) do txt = txt .. " | " .. wp.name end
+		-- FILL: atualizar texto do label de lista se necessario
+	end
+
+	if addCtrl and addCtrl.Row then
+		addCtrl:_conn(addCtrl.Row.Activated, function()
+			local root = getRoot()
+			if not root then return end
+			local name = ui:Get("nav_wpname") or ("WP" .. (#waypoints + 1))
+			table.insert(waypoints, { name = name, position = root.Position })
+			refreshList()
+			ui:Notify("Waypoint", "Adicionado: " .. name, "info")
+		end)
+	end
+	if tpBtnCtrl and tpBtnCtrl.Row then
+		tpBtnCtrl:_conn(tpBtnCtrl.Row.Activated, function()
+			local name = ui:Get("nav_tpplayer")
+			if not name or name == "" then return end
+			local target = Players:FindFirstChild(name)
+			if not target then ui:Notify("Navigation", "Jogador nao encontrado", "error"); return end
+			local troot = getPlayerRoot(target)
+			if not troot then ui:Notify("Navigation", "Sem raiz do personagem", "error"); return end
+			if teleportTo(troot.Position) then
+				ui:Notify("Navigation", "Teleportado para " .. name, "info")
+			else
+				ui:Notify("Navigation", "Falha ao teleportar", "error")
+			end
+		end)
+	end
+
+	local function teleportWaypoint(wp)
+		if teleportTo(wp.position) then
+			ui:Notify("Waypoint", "Teleportado para " .. wp.name, "info")
+		else
+			ui:Notify("Waypoint", "Falha ao teleportar", "error")
+		end
+	end
+
+	-- Lista de botoes dinamicos por waypoint (recriada quando a lista muda)
+	local wpButtons = {}
+	local function rebuildWPButtons()
+		-- FILL: criar botoes um abaixo do outro na secao; omitido para nao duplicar controles
+		-- O usuario pode teleportar via comando ou lista separada (Fase polish)
+	end
+
+	return { stop = function()
+		for _, b in ipairs(wpButtons) do if b.Row then pcall(function() b.Row:Destroy() end) end end
+		wpButtons = {}
+	end }
+end
+-- src/modules/hub/AntiAFK.lua  (F-100, parte 2)
+-- Simula entrada periodica para evitar kick por inatividade.
+-- Nao depende de offset de jogo (usa VirtualInputManager ou movimento virtual),
+-- mas a eficacia varia por titulo (detecao de AFK e do lado do servidor).
+-- Flags: ui:Get("antiafk_*") / ui:Set("antiafk_*", v). Controles na aba "Anti-AFK".
+
+UI.HubModules.AntiAFK = function(ui, win)
+	local RunService = game:GetService("RunService")
+	local Players = game:GetService("Players")
+	local VIM = game:GetService("VirtualInputManager")
+	local localPlayer = Players.LocalPlayer
+
+	local section = win:CreateTab("Anti-AFK", 70):CreateSection("Anti-AFK")
+	local cEnabled = section:Toggle({ Name = "Enabled", Default = false, Flag = "antiafk_enabled" })
+	local cInterval = section:Slider({ Name = "Interval (s)", Min = 10, Max = 300, Default = 60, Flag = "antiafk_interval" })
+	local cMethod = section:Dropdown({ Name = "Method", Options = { "Jump", "Move", "Input" }, Default = "Jump", Flag = "antiafk_method" })
+
+	local lastAction = 0
+	local conn = RunService.Heartbeat:Connect(function()
+		if not ui:Get("antiafk_enabled") then return end
+		local now = os.clock()
+		if now - lastAction < ui:Get("antiafk_interval") then return end
+		local method = ui:Get("antiafk_method")
+		local hum = localPlayer.Character and localPlayer.Character:FindFirstChildOfClass("Humanoid")
+		if method == "Jump" and hum then
+			pcall(function() hum.Jump = true end)
+		elseif method == "Move" then
+			-- FILL: aplicar movimento virtual curto ao personagem (jogo especifico)
+		elseif method == "Input" then
+			-- FILL: enviar entrada virtual via VirtualInputManager (alguns jogos ignoram)
+			pcall(function()
+				VIM:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+				task.delay(0.1, function() VIM:SendKeyEvent(false, Enum.KeyCode.Space, false, game) end)
+			end)
+		end
+		lastAction = now
+	end)
+
+	return { stop = function() if conn then conn:Disconnect() end end }
+end
+
+return UI
+end)()
+local ok, err = pcall(function()
+	local ui = UI.new()
+	local win = ui:CreateWindow({ Title = "DERBYBLOOM", Author = "DerbyBloom" })
+	local main = win:CreateTab("Principal", 1)
+	main:CreateSection("Controles")
+		:Toggle({ Name = "Toggle", Description = "teste", Callback = function(v) print("[derbybloom] toggle", v) end })
+		:Slider({ Name = "Slider", Min = 0, Max = 100, Step = 1, Default = 25, Callback = function(v) print("[derbybloom] slider", v) end })
+		:Dropdown({ Name = "Dropdown", Options = { "A", "B", "C" }, Default = "A", Callback = function(v) print("[derbybloom] dd", v) end })
+		:MultiDropdown({ Name = "Multi", Options = { "um", "dois", "tres" }, Default = { "um" }, Callback = function(l) print("[derbybloom] multi", table.concat(l, ",")) end })
+		:Keybind({ Name = "Keybind", Default = Enum.KeyCode.G, Callback = function() print("[derbybloom] bind") end })
+		:ColorPicker({ Name = "Cor", Default = Color3.fromRGB(255, 105, 180), Callback = function(c) print("[derbybloom] cor", c) end })
+		:TextBox({ Name = "TextBox", Placeholder = "digite", Callback = function(t) print("[derbybloom] txt", t) end })
+		:Button({ Name = "Notificar", Callback = function() ui:Notify("Pronto", "Tudo certo", "success") end })
+	local cfg = win:CreateTab("Config", 2)
+	cfg:CreateSection("Config")
+		:Button({ Name = "Resetar", Callback = function() ui:ResetAll() end })
+	ui:Notify("DERBYBLOOM", "UI carregada. Insert abre/fecha.", "success")
+	print("[derbybloom] ok")
+end)
+if not ok then warn("[derbybloom] erro: " .. tostring(err)) end
